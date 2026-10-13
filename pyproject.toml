@@ -1,0 +1,77 @@
+[project]
+name = "emergent-self-preservation"
+version = "0.1.0"
+description = "A clean-room test of whether self-preservation emerges from selection alone"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# Every version below is pinned to exactly what was installed in the working conda-forge environment on
+# 2026-07-30, read out with `pip list --format=freeze` rather than chosen. This is deliberate and it is the
+# single most important property of this file.
+#
+# CLAUDE.md section 11: never upgrade JAX, jaxlib, or the CUDA stack mid-phase, because gate E1 establishes a
+# determinism baseline that an upgrade invalidates, and results either side of an upgrade are not comparable.
+# Declaring loose bounds and letting the resolver pick would silently move JAX and void E1, and the symptom
+# would be a determinism gate failing weeks later for reasons nobody connects back to this file.
+#
+# Verified working combination:
+#   jax / jaxlib / jax-cuda12-plugin / jax-cuda12-pjrt   0.11.0
+#   nvidia-cuda-runtime-cu12 12.9.79, nvidia-cudnn-cu12 9.24.0.43
+#   NVIDIA driver 610.74, CUDA UMD 13.3, RTX 4060 Laptop, WSL2 Ubuntu 20.04, glibc 2.31
+#   Python 3.12.13
+#
+# The CUDA extra is pinned explicitly rather than relying on a plain `jax` requirement. A plain requirement
+# resolves to the CPU build, and the failure mode is a silent CPU fallback that presents as a performance
+# problem rather than as a missing dependency. Gate E0 asserts a CudaDevice for this reason.
+dependencies = [
+    "jax[cuda12]==0.11.0",
+    "numpy==2.5.1",
+    "scipy==1.18.0",
+    "matplotlib==3.10.7",
+    # Pinned to match the conda environment exactly. Left to resolve freely, uv picks 2.31.2 against the
+    # conda environment's 2.30.7, which is a CUDA-stack change and therefore covered by the no-upgrade rule
+    # even though NCCL handles multi-GPU collectives and is effectively unused on one card. Pinning it costs
+    # nothing and keeps "the environment the gates were verified in" literally true rather than nearly true.
+    "nvidia-nccl-cu12==2.30.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.14.4",
+    "pre-commit==4.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Only source and configuration are packaged. `history/` holds sixty-odd markdown files and `docs/` holds
+# more; a default include pattern sweeps both into the wheel for no reason. `configs/` is included because a
+# run is only reproducible if its config travels with the code.
+[tool.hatch.build.targets.wheel]
+packages = ["src", "configs"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501 is handled by the formatter; long lines in docstrings are deliberate and readable.
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Deliberately no `addopts = "-q"`. It was there and it made every documented command misbehave: `-q` in
+# addopts plus `-q` on the command line is `-qq`, which suppresses the summary line, so `pytest tests/ -q`
+# printed progress dots and no count while the README told people to expect 125 passing tests.
+#
+# The first fix was to document "do not add -q", which is prose enforcement and the level D-023 exists to
+# demote. Removing it from addopts makes every documented command behave as documented, everywhere, with
+# nothing to remember. See D-024.
+markers = [
+    # Registered so that `-m "not slow"` emits no unknown-marker warning. Unregistered markers warn on every
+    # run, and that is the noise that trains people to ignore pytest output.
+    "slow: excluded from the pre-commit hook. Gates needing a full evolutionary run, and any test THAT RUNS IN THE HOOK SUBSET whose CALL duration exceeds five seconds as reported by --durations=0. Tests outside the hook subset, meaning tests/differential and tests/scientific, are out of scope entirely rather than exempt by judgement, however long they take. The rule is lexical rather than a judgement about whether the hook feels slow, because a bypassed hook is worse than no hook and the threshold for bypassing is a feeling. Naming the measurement matters: shared-fixture setup is OUT of scope, since pytest attributes it to whichever test runs first and marking that one saves nothing. A fixture over five seconds is a separate question for open-questions.md. Applied per test rather than per file so the hook keeps the most coverage; each mark site records its measured duration. Re-measure at every build step. See CLAUDE.md section 10 and Q-019",
+]
