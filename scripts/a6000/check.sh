@@ -70,7 +70,7 @@ finish() {
   exit 0
 }
 
-# The eighteen tests that check the full repository's own records (its run registry, its unswept-parameter
+# The tests that check the full repository's own records (its run registry, its unswept-parameter
 # list, its repository map, its git history) rather than the code or the hardware. They pass in the full
 # repository and are deselected here, where those records are not shipped.
 DESELECT_ENG=(
@@ -87,6 +87,9 @@ DESELECT_SCI=(
   --deselect tests/scientific/test_preregistration.py::test_every_registered_run_declares_its_phase_unambiguously
   --deselect tests/scientific/test_preregistration.py::test_no_phase_b_run_predates_its_pre_registration
   --deselect tests/scientific/test_preregistration.py::test_the_marker_convention_is_documented
+  # Reads the commit before HEAD. This repository is generated with a single commit, so there is none; in a
+  # copy placed inside the research repository it silently read that repository's history instead.
+  --deselect tests/scientific/test_preregistration.py::test_the_ancestor_mechanism_actually_works
   # S5 and S6 read the null baseline, which run.sh produces on this machine. run.sh runs them then.
   --deselect tests/scientific/test_s5_s6_null.py
 )

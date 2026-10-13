@@ -9,7 +9,7 @@ the characterisation sweep, plus the commands to do it.
 refuse to start if a shipped file has been edited. If something goes wrong, the run either recovers by
 itself or stops with a message saying what to do, and the table at the end lists every message.
 
-    source commit     d071b02ae5e5e8ce9c1172a984d1732c45d3c64b
+    source commit     88581992dc77f39a05770ef37c3a04f8962b267a
     verified commit   e6b93b782bcb9fe8df6c920842ccb00d1a665f19   the run code is byte-identical to this commit, which passed
                                            the full differential test tier
 
@@ -90,7 +90,8 @@ It ends with one of two lines:
 If it fails, stop and send the folder `results/check-<time>` to the project team. Do not try to fix it.
 
 **What is and is not tested here.** Every test file of the research repository is included and run.
-Eighteen individual tests are deselected, because they check the full research repository's own record files (its run registry, its list of
+A small number of individual tests, named at the top of `scripts/a6000/check.sh`, are deselected,
+because they check the full research repository's own record files (its run registry, its list of
 unswept parameters, its map of modules, its git history), which are not shipped with this code. They pass in
 the full repository and concern no part of the code or the hardware. Gates S5 and S6 need the null baseline,
 which does not exist yet, so the check skips them and step 3 runs them.
