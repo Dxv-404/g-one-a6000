@@ -35,6 +35,19 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
+# Every matmul in the policy runs at full float32 precision, by owner ruling on Q-052, D-068. JAX's default on
+# NVIDIA GPUs runs a BATCHED float32 matmul in TF32, and the network is evaluated batched over the prey, so
+# the evolved policy would run on hardware-rounded arithmetic: measured on the A6000 against a float64
+# reference, batched logits off by 1.1e-3 at the default against 8.7e-7 here. Pinned per call rather than by
+# `jax.default_matmul_precision`, so no environment variable, context or caller can undo it.
+_PRECISION = jax.lax.Precision.HIGHEST
+
+
+def _mm(a: Array, b: Array) -> Array:
+    """`a @ b` at full float32 precision. Every matmul in this module goes through here."""
+    return jnp.matmul(a, b, precision=_PRECISION)
+
+
 # GRU gate order, fixed here because it is exactly the sort of convention two implementations can disagree
 # about while each stays internally consistent. Reset, update, candidate.
 GATE_R, GATE_Z, GATE_N = 0, 1, 2
@@ -93,17 +106,17 @@ def gru_cell(w: dict, x: Array, h: Array) -> Array:
     place implementations differ observably while both look correct, and it is why the oracle recomputes this
     independently rather than trusting the shape of the code.
     """
-    r = jax.nn.sigmoid(x @ w["w_xr"] + h @ w["w_hr"] + w["b_r"])
-    z = jax.nn.sigmoid(x @ w["w_xz"] + h @ w["w_hz"] + w["b_z"])
-    n = jnp.tanh(x @ w["w_xn"] + (r * h) @ w["w_hn"] + w["b_n"])
+    r = jax.nn.sigmoid(_mm(x, w["w_xr"]) + _mm(h, w["w_hr"]) + w["b_r"])
+    z = jax.nn.sigmoid(_mm(x, w["w_xz"]) + _mm(h, w["w_hz"]) + w["b_z"])
+    n = jnp.tanh(_mm(x, w["w_xn"]) + _mm(r * h, w["w_hn"]) + w["b_n"])
     return (1.0 - z) * n + z * h
 
 
 def forward(w: dict, obs: Array, h: Array) -> tuple[Array, Array]:
     """One tick. Returns (action_logits, new_hidden). Single-agent; obtain the batch by `vmap`."""
-    x = jnp.tanh(obs @ w["w_in"] + w["b_in"])
+    x = jnp.tanh(_mm(obs, w["w_in"]) + w["b_in"])
     h_next = gru_cell(w, x, h)
-    return h_next @ w["w_out"] + w["b_out"], h_next
+    return _mm(h_next, w["w_out"]) + w["b_out"], h_next
 
 
 def select_action(logits: Array) -> Array:

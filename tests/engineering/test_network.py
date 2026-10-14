@@ -163,3 +163,90 @@ def test_weights_flatten_for_evosax(weights):
     restored = unravel(flat)
     for k in weights:
         assert bool(jnp.all(restored[k] == weights[k])), f"{k} did not survive a flatten and unflatten"
+
+
+# ---------------------------------------------------------------------------------------------- Q-052, D-068
+
+#: The batched logits' distance from a float64 reference, measured on the A6000 with this fixture: 8.7e-7 with
+#: the network's matmuls pinned to HIGHEST, 1.1e-3 under JAX's default TF32. 1e-5 sits more than ten times
+#: from each, so it separates the two states rather than tolerating either.
+FULL_PRECISION_BOUND = 1e-5
+
+
+def _precision_fixture():
+    """Batched inputs with every term live: perturbed weights so no bias is zero, a non-zero hidden state."""
+    k = jax.random.split(jax.random.key(7), 4)
+    w = net.init_params(k[0], P)
+    w = {
+        name: v + 0.1 * jax.random.normal(jax.random.fold_in(k[1], i), v.shape)
+        for i, (name, v) in enumerate(sorted(w.items()))
+    }
+    obs = jax.random.uniform(k[2], (256, P.obs_dim))
+    h = 0.5 * jax.random.normal(k[3], (256, P.hd))
+    return w, obs, h
+
+
+def _float64_logits(w, obs, h):
+    """The forward pass in NumPy float64, written from the GRU equations, not from the implementation."""
+    w = {name: np.asarray(v, np.float64) for name, v in w.items()}
+    obs, h = np.asarray(obs, np.float64), np.asarray(h, np.float64)
+
+    def sig(v):
+        return 1.0 / (1.0 + np.exp(-v))
+
+    x = np.tanh(obs @ w["w_in"] + w["b_in"])
+    r = sig(x @ w["w_xr"] + h @ w["w_hr"] + w["b_r"])
+    z = sig(x @ w["w_xz"] + h @ w["w_hz"] + w["b_z"])
+    n = np.tanh(x @ w["w_xn"] + (r * h) @ w["w_hn"] + w["b_n"])
+    return ((1.0 - z) * n + z * h) @ w["w_out"] + w["b_out"]
+
+
+def _batched_error(w, obs, h):
+    logits, _ = jax.jit(jax.vmap(net.forward, in_axes=(None, 0, 0)))(w, obs, h)
+    return float(np.max(np.abs(np.asarray(logits, np.float64) - _float64_logits(w, obs, h))))
+
+
+def test_the_batched_forward_runs_at_full_float32_precision():
+    """Q-052, ruled: the policy runs at full float32, not the GPU's TF32. Batched, as evolution evaluates it."""
+    err = _batched_error(*_precision_fixture())
+    assert err < FULL_PRECISION_BOUND, (
+        f"batched logits are {err:.2e} from a float64 reference against a bound of {FULL_PRECISION_BOUND:.0e}. "
+        "The network's matmuls are running at reduced precision, so evolution is selecting on "
+        "hardware-rounded arithmetic. D-068."
+    )
+
+
+def test_no_precision_context_can_lower_the_network():
+    """Pinned per call, so a caller's `default_matmul_precision`, or the matching environment variable, is inert."""
+    # bfloat16 is the lowest setting JAX accepts here. "fastest" reads as if it should exist and does not.
+    with jax.default_matmul_precision("bfloat16"):
+        err = _batched_error(*_precision_fixture())
+    assert err < FULL_PRECISION_BOUND, (
+        f"under default_matmul_precision('bfloat16') the batched logits are {err:.2e} from float64. The pin "
+        "is not per call, so something outside the network can change the arithmetic evolution runs on."
+    )
+
+
+def test_the_fixture_can_see_reduced_precision():
+    """The two tests above are only evidence if this fixture shows TF32 when it is present. On the GPU it must.
+
+    The same batched computation with plain `@`, at JAX's default precision. On a CPU there is no TF32 and
+    nothing to see, so the precondition applies only on the GPU, which is where the run happens.
+    """
+    if jax.devices()[0].platform != "gpu":
+        pytest.skip("no TF32 on a CPU, so the precondition has nothing to show")
+    w, obs, h = _precision_fixture()
+
+    def plain(obs_i, h_i):
+        x = jnp.tanh(obs_i @ w["w_in"] + w["b_in"])
+        r = jax.nn.sigmoid(x @ w["w_xr"] + h_i @ w["w_hr"] + w["b_r"])
+        z = jax.nn.sigmoid(x @ w["w_xz"] + h_i @ w["w_hz"] + w["b_z"])
+        n = jnp.tanh(x @ w["w_xn"] + (r * h_i) @ w["w_hn"] + w["b_n"])
+        return ((1.0 - z) * n + z * h_i) @ w["w_out"] + w["b_out"]
+
+    logits = jax.jit(jax.vmap(plain))(obs, h)
+    err = float(np.max(np.abs(np.asarray(logits, np.float64) - _float64_logits(w, obs, h))))
+    assert err > 10 * FULL_PRECISION_BOUND, (
+        f"an unpinned batched forward is only {err:.2e} from float64 on this GPU, so this fixture cannot tell "
+        "full precision from TF32 and the two tests above would pass either way."
+    )

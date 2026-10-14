@@ -28,7 +28,10 @@ scrub_environment >"$OUT/environment.txt"
 cat "$OUT/environment.txt"
 
 # A step interrupted by Ctrl-C can exit like a failure, and must not be reported as one, or as a pass.
-trap 'echo; echo "CHECK STOPPED by Ctrl-C. Nothing was certified. Run  bash scripts/a6000/check.sh  again; it starts from the beginning."; rm -f results/MACHINE_VERIFIED; exit 130' INT TERM
+# STEP_PID is the running step's `timeout`. It sits in its own process group, so the terminal's Ctrl-C never
+# reaches it; the trap passes the signal on, and `timeout` forwards it to the whole step.
+STEP_PID=""
+trap 'echo; echo "CHECK STOPPED by Ctrl-C. Nothing was certified. Run  bash scripts/a6000/check.sh  again; it starts from the beginning."; [ -n "$STEP_PID" ] && kill -TERM "$STEP_PID" 2>/dev/null; rm -f results/MACHINE_VERIFIED; exit 130' INT TERM
 
 say() { echo "$(date '+%H:%M:%S')  $*"; }
 
@@ -39,6 +42,10 @@ say() { echo "$(date '+%H:%M:%S')  $*"; }
 # times the step's duration measured on the A6000 in session 22, so a slow machine still passes and a hang
 # fails within the hour. The command runs under `timeout` through `bash -c`, so shell functions work too;
 # the functions and the variables they read are exported below. Exit 124 is the timeout.
+#
+# It runs in the background and is waited for, because bash runs a trap only after a FOREGROUND command
+# returns: run in the foreground, a Ctrl-C did nothing until the step ended, up to its whole limit. Measured
+# in session 22, when a Ctrl-C sat unanswered through a 15-minute step. `wait` returns at once on a signal.
 step() {
   local required=$1 limit=$2 name=$3 log=$4
   shift 4
@@ -47,8 +54,11 @@ step() {
   echo
   say "=== $name   (limit ${limit}s)"
   say "    full output: $OUT/$log"
-  timeout --kill-after=60 "$limit" bash -c '"$@"' step "$@" >"$OUT/$log" 2>&1
+  timeout --kill-after=60 "$limit" bash -c '"$@"' step "$@" >"$OUT/$log" 2>&1 &
+  STEP_PID=$!
+  wait "$STEP_PID"
   rc=$?
+  STEP_PID=""
   dt=$(($(date +%s) - t0))
   [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && echo "TIMED OUT after ${limit}s: killed as a hang, not a failure of the code" >>"$OUT/$log"
   tail -n 4 "$OUT/$log" | sed 's/^/      /'

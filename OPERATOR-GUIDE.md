@@ -404,6 +404,9 @@ wait for their go-ahead before step 5.**
 bash scripts/a6000/run.sh sweep
 ```
 
+Add `--verbose` (`bash scripts/a6000/run.sh sweep --verbose`) for a progress line every generation instead
+of every few; it changes what is printed, never what is computed.
+
 **Why.** This is the experiment: 109 conditions, each one parameter moved away from its default, ten seeds
 of 300 generations each. The two baseline conditions from step 4 are reused, so it starts with 2 of 109
 done.

@@ -5,6 +5,7 @@
 #   bash scripts/a6000/run.sh sweep        the sweep. Needs the baselines. Roughly 2 to 3 days
 #   bash scripts/a6000/run.sh all          both, one after the other
 #   bash scripts/a6000/run.sh all --smoke  the same control flow at toy size, into runs/smoke-run
+#   add --verbose to any of these for a progress line every generation (sweep.py --progress verbose)
 #
 # Run inside tmux. Safe to run again at any time with the same arguments: finished seeds and conditions are
 # kept and never repeated, so after a crash, a reboot or a power cut the same command simply continues.
@@ -20,7 +21,14 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 STAGE=${1:-}
 SMOKE=0
-[ "${2:-}" = "--smoke" ] && SMOKE=1
+PROGRESS=()
+for arg in "${@:2}"; do
+  case "$arg" in
+  --smoke) SMOKE=1 ;;
+  --verbose) PROGRESS=(--progress verbose) ;;
+  *) echo "unknown option: $arg"; echo "usage: bash scripts/a6000/run.sh baselines|sweep|all [--smoke] [--verbose]"; exit 2 ;;
+  esac
+done
 SHA=$(cat VERIFIED_COMMIT)  # the run code is byte-identical to this commit, which passed the full differential
 PY="$ROOT/.venv/bin/python"
 MAX_RESTARTS=8
@@ -49,7 +57,7 @@ on_interrupt() {
 trap on_interrupt INT TERM
 
 usage() {
-  echo "usage: bash scripts/a6000/run.sh baselines|sweep|all [--smoke]"
+  echo "usage: bash scripts/a6000/run.sh baselines|sweep|all [--smoke] [--verbose]"
   exit 2
 }
 
@@ -93,7 +101,8 @@ supervise() {
   while :; do
     attempt=$((attempt + 1))
     say "starting $desc (attempt $attempt of $MAX_RESTARTS)"
-    "$PY" -u scripts/measure/sweep.py "$OUT" --verified-commit "$SHA" ${EXTRA[@]+"${EXTRA[@]}"} "$@" &
+    "$PY" -u scripts/measure/sweep.py "$OUT" --verified-commit "$SHA" ${EXTRA[@]+"${EXTRA[@]}"} \
+      ${PROGRESS[@]+"${PROGRESS[@]}"} "$@" &
     pid=$!
     launched=$(date +%s)
     # bash starts a background process with Ctrl-C IGNORED, and Python then never installs its handler, so

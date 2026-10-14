@@ -9,8 +9,8 @@ the characterisation sweep, plus the commands to do it.
 refuse to start if a shipped file has been edited. If something goes wrong, the run either recovers by
 itself or stops with a message saying what to do, and the table at the end lists every message.
 
-    source commit     027781bb452de8dadacde5240b2349a0c6b2e920
-    verified commit   7ca0ca2f32d377fa551a0a42d745857907449773   the run code is byte-identical to this commit, which passed
+    source commit     588f814cdf614a84bcb3ad109c69f9e936bfd890
+    verified commit   a68b679ef0080c4f932427a400395ff19aad9997   the run code is byte-identical to this commit, which passed
                                            the full differential test tier
 
 **New to this? Read `OPERATOR-GUIDE.md` first.** It walks through every command with why it is there, the output to
