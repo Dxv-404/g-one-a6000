@@ -22,6 +22,14 @@ PY="$ROOT/.venv/bin/python"
 SUMMARY=()
 FAILED=""
 
+# The same environment the run will have, D-063. Redirected rather than piped, so the unsets happen here.
+. scripts/a6000/env.sh
+scrub_environment >"$OUT/environment.txt"
+cat "$OUT/environment.txt"
+
+# A step interrupted by Ctrl-C can exit like a failure, and must not be reported as one, or as a pass.
+trap 'echo; echo "CHECK STOPPED by Ctrl-C. Nothing was certified. Run  bash scripts/a6000/check.sh  again; it starts from the beginning."; rm -f results/MACHINE_VERIFIED; exit 130' INT TERM
+
 say() { echo "$(date '+%H:%M:%S')  $*"; }
 
 # step <required: yes|no> <name> <log file> <command...>
@@ -104,6 +112,8 @@ machine_facts() {
   echo "disk free   $(df -BG --output=avail . | tail -1 | tr -d ' ') where the results go"
   echo "tmux        $(command -v tmux || echo 'NOT INSTALLED: the run must be started inside tmux or with nohup')"
   echo "uv          $(uv --version 2>/dev/null || echo 'NOT INSTALLED')"
+  echo "user        $(id -un)$([ "$(id -u)" = 0 ] && echo '   RUNNING AS ROOT: files will be owned by root')"
+  command -v quota >/dev/null && { echo "disk quota:"; quota -s 2>&1 | sed 's/^/            /'; }
   echo
   nvidia-smi
 }

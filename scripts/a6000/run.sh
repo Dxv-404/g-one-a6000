@@ -36,6 +36,18 @@ RUNLOG="$OUT/run.log"
 
 say() { echo "$(date '+%Y-%m-%d %H:%M:%S')  run.sh  $*" | tee -a "$RUNLOG"; }
 
+# The same environment the check certified. Redirected rather than piped, so the unsets happen in this shell.
+. scripts/a6000/env.sh
+scrub_environment >"$OUT/environment.txt"
+while read -r line; do say "$line"; done <"$OUT/environment.txt"
+
+# Ctrl-C, or a TERM from outside, outside a supervised run: the gates and the power analysis.
+on_interrupt() {
+  say "stopped by Ctrl-C (exit 130). Nothing finished is lost. Run the same command again to continue."
+  exit 130
+}
+trap on_interrupt INT TERM
+
 usage() {
   echo "usage: bash scripts/a6000/run.sh baselines|sweep|all [--smoke]"
   exit 2
@@ -53,6 +65,12 @@ preflight() {
     say "STOPPED: this machine has not passed the check. Run  bash scripts/a6000/check.sh  and let it pass."
     exit 2
   fi
+  if ! gpu_probe "$PY" >"$OUT/gpu_probe.txt" 2>&1; then
+    tail -n 3 "$OUT/gpu_probe.txt" | tee -a "$RUNLOG"
+    say "STOPPED: JAX cannot use the GPU from this terminal. Check that nvidia-smi works, then run again."
+    exit 2
+  fi
+  say "$(tail -n 1 "$OUT/gpu_probe.txt")"
   if [ -z "${TMUX:-}" ] && [ -z "${STY:-}" ] && [ "${ALLOW_NO_TMUX:-0}" != 1 ]; then
     say "WARNING: not inside tmux. If this terminal or its VS Code window closes, the run dies with it."
     say "         Start  tmux new -s gone  and run this command inside it. Continuing in 20 seconds."
@@ -64,15 +82,25 @@ preflight() {
 supervise() {
   local desc=$1
   shift
-  local attempt=0 pid rc launched age mtime
+  local attempt=0 pid rc launched age mtime nap
   while :; do
     attempt=$((attempt + 1))
     say "starting $desc (attempt $attempt of $MAX_RESTARTS)"
     "$PY" -u scripts/measure/sweep.py "$OUT" --verified-commit "$SHA" ${EXTRA[@]+"${EXTRA[@]}"} "$@" &
     pid=$!
     launched=$(date +%s)
+    # bash starts a background process with Ctrl-C IGNORED, and Python then never installs its handler, so
+    # a Ctrl-C used to end run.sh and leave the sweep running unsupervised. Measured, D-063. Catch it here
+    # and pass it on as TERM, which is safe at any instant: every checkpoint is written to a temporary name
+    # and renamed, so a kill leaves the old file or the new one, never half of one.
+    STOPPING=0
+    trap 'STOPPING=1; kill -TERM "$pid" 2>/dev/null' INT TERM
     while kill -0 "$pid" 2>/dev/null; do
-      sleep 30
+      sleep 30 &
+      nap=$!
+      wait "$nap" 2>/dev/null
+      kill "$nap" 2>/dev/null
+      [ "$STOPPING" = 1 ] && break
       mtime=$launched
       [ -f "$OUT/status.json" ] && mtime=$(stat -c %Y "$OUT/status.json")
       [ "$mtime" -lt "$launched" ] && mtime=$launched
@@ -84,8 +112,17 @@ supervise() {
         kill -KILL "$pid" 2>/dev/null
       fi
     done
+    if [ "$STOPPING" = 1 ]; then
+      for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      say "stopped by Ctrl-C (exit 130). Finished seeds are kept; the seed that was running is redone."
+      say "Run the same command again to continue."
+      exit 130
+    fi
     wait "$pid"
     rc=$?
+    trap on_interrupt INT TERM
     case $rc in
     0)
       say "$desc finished"
