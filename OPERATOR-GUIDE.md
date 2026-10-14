@@ -7,7 +7,7 @@ is the walkthrough.
 
 ```
 1. Before you start     what the machine needs                         10 minutes
-2. Set up               install uv, clone, VS Code, tmux               10 minutes
+2. Set up               WSL on Windows, uv, clone, VS Code, tmux      10 to 40 minutes
 3. Check the machine    bash scripts/a6000/check.sh                    45 to 75 minutes
 4. Baselines            bash scripts/a6000/run.sh baselines            1 to 2 hours
 5. The sweep            bash scripts/a6000/run.sh sweep                about 2 to 3 days, estimated
@@ -26,21 +26,19 @@ mistake.
 
 | Need | How to check | Why |
 |---|---|---|
-| Linux, or Windows with WSL2 | `uname -a` | The code and scripts are Linux only |
+| Linux, or Windows 10 or 11 with WSL2 | `uname -a` | The code and scripts are Linux only. On Windows, section 2.0 sets this up |
 | The NVIDIA driver, showing the A6000 | `nvidia-smi` | JAX talks to the GPU only through the driver |
 | Driver supporting CUDA 12.9 | `nvidia-smi`, top right, `CUDA Version: 12.9` or higher | The environment ships CUDA 12.9 libraries. An older driver may still work; the check decides, at gate E0 |
 | 100 GB free where you clone | `df -h ~` | About 80 GB of checkpoints, plus margin. The check refuses below 100 GB |
 | About 5 GB free in your home folder | `df -h ~` | The download cache, about 3 GB, and JAX's compile cache, capped at 2 GB, live in `~/.cache` |
-| No disk quota below 100 GB | `quota -s`, if the command exists | `df` cannot see a per-user quota. A quota hit mid-run crashes every restart. The check prints your quota |
+| No disk quota below 100 GB | `quota -s`, if the command exists | `df` cannot see a per-user quota. A quota hit mid-run crashes every restart. The check records it in `00-machine.log` |
 | At least 8 GB of free RAM | `free -g`, the `available` column | The sweep refuses to start under 4 GB available and warns under 6 |
 | tmux | `tmux -V` | Keeps the run alive when the terminal or SSH connection closes |
 | Internet, at setup only | | The clone and the environment download. The run itself needs no network |
-| An ordinary user account, not root | `whoami` | Run as root, every file ends up owned by root. Never use `sudo` for any command in this guide |
+| An ordinary user account, not root | `whoami` | Run as root, every file ends up owned by root. Use `sudo` only for the `apt install` lines that add a missing system tool, never for the run |
 
-**On Windows with WSL2, also:** keep the clone in the Linux home folder (`~`), never under `/mnt/c`. The
-check refuses `/mnt/c`, because small-file writes there are hundreds of times slower. Set Windows to never
-sleep while plugged in, and pause Windows Update for the week, because an automatic restart stops the run.
-After such a restart, see "If something happens" below.
+**On Windows, do section 2.0 first.** Bash commands do not work in PowerShell or the Command Prompt, so
+on Windows every command in this guide is typed in an Ubuntu terminal running inside WSL.
 
 ### Packages, `requirements.txt`, and the virtual environment
 
@@ -94,6 +92,82 @@ You do not need to set anything else, and nothing needs exporting in `~/.bashrc`
 
 ## 2. Set up
 
+### 2.0 Only on Windows: WSL, the GPU, and VS Code
+
+**Why.** The scripts are bash, and JAX's GPU build exists only for Linux. WSL2 runs a real Ubuntu inside
+Windows that can use the Windows GPU directly. **The default VS Code terminal on Windows is PowerShell, and
+none of the commands in this guide work there.** Skip this section on a Linux machine.
+
+**a. The NVIDIA driver, on Windows.** Install the ordinary Windows driver for the RTX A6000 from NVIDIA's
+website. That is the only driver needed: WSL uses it directly. **Never install an NVIDIA driver inside
+Ubuntu**; doing so is the most common way to break the GPU in WSL.
+
+**b. Install WSL and Ubuntu.** Open PowerShell as Administrator: Start menu, type `PowerShell`, right
+click, Run as administrator. Then:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+*Expected:* it downloads and installs WSL and Ubuntu, then asks you to restart Windows. After the restart an
+Ubuntu window opens and asks for a **new UNIX username and password**. These are only for Ubuntu and need
+not match your Windows login; you will type this password whenever a line uses `sudo`. Then confirm, in
+PowerShell:
+
+```powershell
+wsl -l -v
+```
+
+*Expected:* a line with `Ubuntu`, `Running` or `Stopped`, and `2` in the VERSION column. A `1` there means
+WSL1, which cannot use the GPU: fix it with `wsl --set-version Ubuntu 2`.
+
+*May I stop it?* Not during the install. If interrupted, run the same command again.
+
+**c. Check the GPU from Ubuntu.** Open Ubuntu from the Start menu, the same black window as above, and run:
+
+```bash
+nvidia-smi
+```
+
+*Expected:* a table naming the **NVIDIA RTX A6000**. `command not found` or `No devices were found` means
+the Windows driver from step a is missing or too old; fix that on the Windows side, not in Ubuntu.
+
+**d. The tools Ubuntu needs**, in the same Ubuntu window:
+
+```bash
+sudo apt update && sudo apt install -y git tmux curl
+```
+
+*Expected:* asks for the Ubuntu password from step b, prints package lines, and ends without the word
+`Error`. *May I stop it?* Yes; run it again.
+
+**e. VS Code, connected to WSL.** Install VS Code on Windows if needed. In VS Code open the Extensions panel
+(`Ctrl+Shift+X`), search **WSL**, and install the one published by Microsoft. Then `Ctrl+Shift+P`, type
+**WSL: Connect to WSL**, and press Enter. A new window opens with a coloured badge reading **WSL: Ubuntu**
+in its bottom left corner. In that window, Terminal, New Terminal opens an Ubuntu bash terminal.
+
+**How to tell you are in the right terminal**, which matters more than anything else in this section:
+
+```
+right:  yourname@PCNAME:~$          bash, inside Ubuntu. Every command in this guide works
+wrong:  PS C:\Users\yourname>        PowerShell. Nothing in this guide works here
+```
+
+If you see `PS C:\`, use the small arrow beside the `+` in the terminal panel and choose **Ubuntu (WSL)**,
+or connect the window to WSL as above.
+
+**f. Memory for WSL.** WSL gets half of the PC's memory by default. In the Ubuntu terminal, `free -g` shows
+it; if the `available` column is under 8, close other programs, or ask whoever manages the PC to raise the
+`memory=` limit in `.wslconfig`.
+
+**g. Keep Windows from interrupting a three-day run.**
+- Settings, System, Power: screen and sleep **Never** while plugged in.
+- Settings, Windows Update: **Pause updates** for the length of the run, since an automatic restart stops it.
+- Locking the screen (`Windows+L`) is fine. **Do not sign out, restart or shut down**, and **never run
+  `wsl --shutdown`** while a run is going: each of those stops the run like a power cut.
+
+Continue with 2.1, typed into the Ubuntu terminal.
+
 ### 2.1 Install uv
 
 ```bash
@@ -116,31 +190,69 @@ reopened.
 
 ### 2.2 Get the code
 
+**First, a GitHub token.** The repository is private, and git no longer accepts a GitHub password on the
+command line, so it needs a personal access token instead. Your GitHub account must already have been added
+to the repository; accept the invitation email first if there is one. Then, in a web browser:
+
+1. GitHub, your profile picture (top right), **Settings**.
+2. **Developer settings**, at the bottom of the left menu.
+3. **Personal access tokens**, then **Tokens (classic)**, then **Generate new token (classic)**. Use the
+   classic kind: the newer fine-grained tokens cannot reach a repository you were invited to on someone
+   else's personal account.
+4. Note: `a6000 run`. Expiration: 30 days. Tick the **repo** box. **Generate token**.
+5. Copy the token, which starts `ghp_`. GitHub shows it only once; keep it somewhere private for this step.
+
+**Then clone**, in the Ubuntu or Linux terminal:
+
 ```bash
 cd ~
+```
+```bash
 git clone https://github.com/Dxv-404/g-one-a6000.git g-one-a6000
+```
+```bash
 cd g-one-a6000
 ```
 
-**Why.** The repository is the code exactly as verified. `~` keeps it on the Linux filesystem.
+**Why.** The repository is the code exactly as verified. `cd ~` puts it in the Linux home folder, never on
+a Windows drive, which the check refuses.
 
-**Expected.** The repository is private, so git asks for a username and a password.
-- Give your GitHub username.
-- For the password, paste a **personal access token**, not your GitHub password, which GitHub no longer
-  accepts here. Make one under GitHub, Settings, Developer settings, Personal access tokens. If `gh` is
-  installed, `gh auth login` once does the same job.
-- Then `Cloning into 'g-one-a6000'...`, a few `Receiving objects` lines, and the prompt returns.
-- `Repository not found` means your account has not been given access yet.
+**Expected.**
+
+```
+Cloning into 'g-one-a6000'...
+Username for 'https://github.com': yourname
+Password for 'https://yourname@github.com':        paste the token here, then Enter
+remote: Enumerating objects: ...
+Receiving objects: 100% ...
+```
+
+- **Nothing appears while you paste the token.** That is normal; press Enter. In a VS Code terminal, paste is
+  `Ctrl+Shift+V` or a right click.
+- `Authentication failed` means a typo or a token without the **repo** box ticked: make a new one.
+- `Repository not found` means your account has not been given access yet, or the invitation was not
+  accepted.
+- Finally `pwd` should print `/home/yourname/g-one-a6000`. Anything starting `/mnt/` means you cloned onto a
+  Windows drive: `cd ~` and clone again.
+
+Alternative, if the GitHub CLI is installed: `gh auth login` once, then `gh repo clone Dxv-404/g-one-a6000`.
 
 **May I stop it?** Yes. Delete the half-made folder with `rm -rf ~/g-one-a6000` before trying again, since
 git refuses to clone into a folder that is not empty.
 
 ### 2.3 Open it in VS Code
 
-File, Open Folder, choose `g-one-a6000`. If the machine is remote, first connect with the **Remote-SSH**
-extension, then open the folder on the remote machine. Open a terminal with Terminal, New Terminal.
+- **On Windows with WSL:** in the Ubuntu terminal, inside `~/g-one-a6000`, type `code .` (with the dot).
+  VS Code opens the folder connected to WSL, with **WSL: Ubuntu** in the bottom left corner. Do not open it
+  through File, Open Folder and a `\\wsl$` path: that window's terminals are PowerShell.
+- **On a remote Linux machine:** connect with the **Remote-SSH** extension, then File, Open Folder on the
+  remote machine.
+- **On a local Linux machine:** File, Open Folder.
 
-**Why.** Only for convenience. Everything below works the same in any terminal.
+Then Terminal, New Terminal, and check the prompt ends in `$` rather than starting with `PS`.
+
+**Why.** Only for convenience. Everything below works the same in any Linux or WSL terminal, and in none
+on the Windows side.
 
 ### 2.4 Start tmux
 
@@ -366,7 +478,7 @@ minutes of work.
 |---|---|
 | A `WARNING` line | Usually nothing. Look it up in `README.md` |
 | `ended with exit 1` (or 4, or 5) `... Restarting in 60 seconds` | Nothing. It recovers by itself, up to 8 times in a row |
-| The machine rebooted, lost power, or Windows restarted | Open a terminal, `cd ~/g-one-a6000`, `tmux new -s gone`, and run the **same command** as before. At most one seed is redone |
+| The machine rebooted, lost power, or Windows restarted | Open an Ubuntu or Linux terminal, `cd ~/g-one-a6000`, `tmux new -s gone`, and run the **same command** as before. At most one seed is redone |
 | `STOPPED (exit 3): the disk is nearly full` | Free disk space, then run the same command. Nothing is lost |
 | `STOPPED: JAX cannot use the GPU from this terminal` | Check `nvidia-smi` works. If it does not, the driver needs attention from an administrator. Then run again |
 | `STOPPED: a shipped file has been changed` | Undo it with `git checkout -- .` and run again |

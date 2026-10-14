@@ -188,6 +188,12 @@ sweep() {
   free=$(df -BG --output=avail "$OUT" | tail -1 | tr -dc '0-9')
   [ "$free" -lt 90 ] && say "WARNING: ${free} GB free; the sweep needs about 80 GB. It stops cleanly if space runs out."
   supervise "the sweep"
+  # A rehearsal writes nothing to results/: a SWEEP_DONE or checksum file from toy data would read as the
+  # real thing there. Found when a smoke run left both in a clone, D-063.
+  if [ "$SMOKE" = 1 ]; then
+    say "smoke run complete: the whole control flow works. Its output is in $OUT, and nothing went to results/."
+    return 0
+  fi
   (cd "$OUT" && sha256sum ./*.npz manifest.jsonl >"$ROOT/results/sweep-checksums.sha256")
   echo "sweep done $(date '+%Y-%m-%d %H:%M:%S')" >results/SWEEP_DONE
   say "SWEEP COMPLETE. Send the folder $OUT and the folder results. Checksums: results/sweep-checksums.sha256"

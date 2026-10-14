@@ -9,7 +9,7 @@ the characterisation sweep, plus the commands to do it.
 refuse to start if a shipped file has been edited. If something goes wrong, the run either recovers by
 itself or stops with a message saying what to do, and the table at the end lists every message.
 
-    source commit     76461c630a8cf73bf18f1e0acd8eb2e63ca33522
+    source commit     323c965da6ee6608d9a5d8ed63db26851c5c8d5e
     verified commit   e6b93b782bcb9fe8df6c920842ccb00d1a665f19   the run code is byte-identical to this commit, which passed
                                            the full differential test tier
 
