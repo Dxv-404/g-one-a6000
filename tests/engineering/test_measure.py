@@ -489,3 +489,103 @@ def test_the_accepted_matrix_holds_only_admitted_features_in_order():
     assert names == admitted, "the matrix must follow the admission decisions and their order"
     assert matrix.shape == (n, len(admitted))
     assert "local_density" not in names
+
+
+# ------------------------------------------------------------------ D-065: distancing as own change --
+
+
+def _dgain_row():
+    """One prey, numbers chosen so every D-065 descriptor has a distinct, hand-computable value."""
+    return _acc(
+        dg_perc_ticks=10.0,
+        dg_perc_excess_sum=4.0,
+        dg_perc_emit_sum=6.0,
+        dg_perc_exec_sum=3.0,
+        dg_perc_max_sum=12.0,
+        dg_a_ticks=5.0,
+        dg_a_excess_sum=2.5,
+        dg_b_ticks=5.0,
+        dg_b_excess_sum=1.5,
+        dg_far_ticks=20.0,
+        dg_far_excess_sum=-2.0,
+        dg_occl_ticks=5.0,
+        dg_occl_excess_sum=1.0,
+        dist_sum_alive=90.0,
+        pred_present_ticks=30.0,
+        fid_encounters=8.0,
+        fid_fled=6.0,
+        fid_dist_sum=18.0,
+        fid_latency_sum=12.0,
+        fid_onset_sum=28.0,
+    )
+
+
+def test_the_d065_descriptors_are_the_ratios_they_are_defined_as():
+    d = D.descriptors(_dgain_row(), denominator_floor=FLOOR)
+    expected = {
+        "dgain_perceived": 0.4,  # 4 / 10, chance-corrected
+        "dgain_far": -0.1,  # -2 / 20
+        "conditional_dgain": 0.5,  # 0.4 - (-0.1)
+        "dgain_occluded": 0.2,  # 1 / 5
+        "dgain_sight_contrast": 0.2,  # 0.4 - 0.2
+        "dgain_band_a": 0.5,  # 2.5 / 5
+        "dgain_band_b": 0.3,  # 1.5 / 5, and the bands sum to the perceived total
+        "dgain_perceived_raw": 0.6,  # 6 / 10, the RAW change, a report
+        "dgain_executed": 0.3,  # 3 / 10
+        "dgain_efficiency": 0.25,  # 3 / 12
+        "mean_distance_alive": 3.0,  # 90 / 30
+        "flight_rate": 0.75,  # 6 / 8
+        "flight_initiation_distance": 3.0,  # 18 / 6
+        "flight_latency": 2.0,  # 12 / 6
+        "onset_distance": 3.5,  # 28 / 8
+    }
+    for name, value in expected.items():
+        assert d[name].defined, f"{name} should be defined"
+        assert d[name].value == pytest.approx(value), f"{name} is {d[name].value}, defined as {value}"
+
+
+def test_the_primary_reads_the_chance_corrected_sum_not_the_raw_one():
+    """The raw and corrected sums differ in this row by construction, so reading the wrong one shows."""
+    d = D.descriptors(_dgain_row(), denominator_floor=FLOOR)
+    assert d["dgain_perceived"].value != d["dgain_perceived_raw"].value
+
+
+def test_a_d065_difference_is_undefined_when_either_side_is_and_reports_the_smaller_denominator():
+    row = _dgain_row()
+    row["dg_occl_ticks"] = 2.0  # below FLOOR
+    d = D.descriptors(row, denominator_floor=FLOOR)
+    assert not d["dgain_occluded"].defined and not d["dgain_sight_contrast"].defined
+    assert d["dgain_sight_contrast"].denominator == pytest.approx(2.0)
+    assert d["conditional_dgain"].denominator == pytest.approx(10.0)  # min(10 perceived, 20 far)
+
+
+def test_a_prey_that_never_fled_has_no_flight_distance_rather_than_zero():
+    row = _dgain_row()
+    row["fid_fled"] = 0.0
+    d = D.descriptors(row, denominator_floor=FLOOR)
+    assert not d["flight_initiation_distance"].defined and math.isnan(d["flight_initiation_distance"].value)
+    assert d["flight_rate"].value == 0.0, "a rate over eight encounters is a real zero"
+
+
+def test_the_named_distancing_descriptor_is_chance_corrected_and_not_the_retired_one():
+    """D-065 retires `mean_distance` as evidence. Whatever the battery selects, it must read the prey's own,
+    chance-corrected change, so it must move when the corrected sums move and not when the raw sum does."""
+    name = D.NAMED_STRATEGIES["distancing"]
+    assert name != "mean_distance"
+    base = D.descriptors(_dgain_row(), denominator_floor=FLOOR)[name].value
+    raw_moved = _dgain_row()
+    raw_moved["dg_perc_emit_sum"] = 99.0
+    assert D.descriptors(raw_moved, denominator_floor=FLOOR)[name].value == pytest.approx(base)
+    exc_moved = _dgain_row()
+    exc_moved["dg_perc_excess_sum"] = 9.0
+    assert D.descriptors(exc_moved, denominator_floor=FLOOR)[name].value != pytest.approx(base)
+
+
+def test_population_carries_every_accumulator_field_through():
+    """The list `population` used to keep by hand named 28 fields. It must now read every field there is,
+    so a D-065 descriptor computed through it equals the one computed directly."""
+    rows = [_dgain_row(), _dgain_row()]
+    accs = {f: np.array([r[f] for r in rows]) for f in Accumulators._fields}
+    out = D.population(accs, denominator_floor=FLOOR)
+    assert out["dgain_perceived"].tolist() == pytest.approx([0.4, 0.4])
+    assert out["flight_latency"].tolist() == pytest.approx([2.0, 2.0])

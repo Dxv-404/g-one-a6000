@@ -38,11 +38,10 @@ def pytest_report_header(config):
         lines.append(f"runtime CHECK FAILED: {exc}")
         raise
 
-    if "bytes_limit" in observed:
+    if "allocator" in observed:
         lines.append(
             f"runtime verified: {observed['platform']}, {observed['default_float_dtype']}, "
-            f"allocator pool {observed['pool_bytes'] / 1e6:.0f} MB of a "
-            f"{observed['bytes_limit'] / 1e6:.0f} MB ceiling"
+            f"allocator {observed['allocator']}, bytes_limit {observed['bytes_limit']} (preallocation off)"
         )
     else:
         lines.append(f"runtime verified: {observed['platform']}, {observed['default_float_dtype']}")

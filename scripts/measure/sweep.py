@@ -336,15 +336,43 @@ def assert_checkpoint_schema(path: pathlib.Path) -> None:
         )
 
 
+def assert_same_code(path: pathlib.Path, code_commit: str | None) -> None:
+    """**The code-version guard, D-066. Schema equality is not code equality.**
+
+    D-064 changed selection without changing a single column, so a baseline evolved under the old elitism
+    would have passed `assert_checkpoint_schema` and been reused by a sweep running the new one: two versions
+    of the experiment in one dataset, with nothing in any file to say so. A checkpoint is therefore reused only
+    if the code that wrote it is the code now running, named by the VERIFIED commit, which the derived
+    repository ships as the newest verified commit byte-identical to its runnable code. A checkpoint from
+    before this guard carries no name, so it is refused rather than trusted.
+
+    `code_commit` None skips the check, for the bookkeeping tests that drive `run_condition` directly; the
+    sweep's `main` always passes it.
+    """
+    if code_commit is None:
+        return
+    with np.load(path, allow_pickle=True) as d:
+        stored = str(d["code_commit"]) if "code_commit" in d.files else ""
+    if stored != code_commit:
+        raise SystemExit(
+            f"CODE MISMATCH in {path.name}: it was written by "
+            f"{('code ' + stored) if stored else 'code from before the code-version guard'}, and the code "
+            f"running now is {code_commit}. Reusing it would mix two versions of the experiment in one "
+            "dataset. Delete every output of the old code (the whole output folder, and results/BASELINES_DONE) "
+            "and run again from the baselines. D-066."
+        )
+
+
 _PARTIAL_KEYS = ("fit_mean", "fit_max", "gens", "acc", "final_pop", "naive_acc", "naive_acc_per_genome")
 
 
-def _save_partial(path: pathlib.Path, arm: str, r: dict) -> None:
-    """One seed, written atomically with the schema so the guard can read it."""
+def _save_partial(path: pathlib.Path, arm: str, r: dict, code_commit: str | None = None) -> None:
+    """One seed, written atomically with the schema and the code version so both guards can read it."""
     tmp = path.with_name("." + path.name)
     np.savez(
         tmp,
         arm=np.array(arm),
+        code_commit=np.array(code_commit or ""),
         acc_fields=np.array(ACC_FIELDS + OUTCOME_FIELDS),
         relax=np.int32(r["relax"]),
         **{k: r[k] for k in _PARTIAL_KEYS if k in r},
@@ -390,6 +418,7 @@ def run_condition(
     index: int = 0,
     n_seeds: int | None = None,
     n_generations: int | None = None,
+    code_commit: str | None = None,
 ) -> dict | None:
     """One condition, all seeds. Returns None if it was already complete, which is what makes this resumable.
 
@@ -408,6 +437,7 @@ def run_condition(
     path = out_dir / f"{tag}.npz"
     if path.exists():
         assert_checkpoint_schema(path)
+        assert_same_code(path, code_commit)
         return None
 
     p = params_for(arm, axis, level)
@@ -432,6 +462,7 @@ def run_condition(
         pp = part_dir / f"{tag}.seed{s}.npz"
         if pp.exists():
             assert_checkpoint_schema(pp)
+            assert_same_code(pp, code_commit)
             seeds.append(_load_partial(pp))
             if mon is not None:
                 mon.seed_skipped(s)
@@ -439,7 +470,7 @@ def run_condition(
         if mon is not None:
             mon.seed_start(s)
         r = one_seed(p, s, eval_params=eval_p, **extra)
-        _save_partial(pp, arm, r)
+        _save_partial(pp, arm, r, code_commit)
         seeds.append(r)
         # After the partial is on disk, so a stop raised by a health check never costs the finished seed.
         if mon is not None:
@@ -470,6 +501,7 @@ def run_condition(
         axis=np.array(axis),
         level=np.array(str(level)),
         config_hash=np.array(loop.config_hash(p)),
+        code_commit=np.array(code_commit or ""),
         n_seeds=np.int32(n_seeds),
         n_generations=np.int32(n_gen),
         fit_mean=np.stack([s["fit_mean"] for s in seeds]),
@@ -650,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
             tag = condition_tag(a, ax, lv)
             if (out_dir / f"{tag}.npz").exists():
                 assert_checkpoint_schema(out_dir / f"{tag}.npz")
+                assert_same_code(out_dir / f"{tag}.npz", sha)
                 left = 0
             else:
                 left = n_seeds - sum(
@@ -695,7 +728,7 @@ def main(argv: list[str] | None = None) -> int:
         done = skipped = 0
         for i, (a, ax, lv) in enumerate(plan, 1):
             kw = {"n_seeds": n_seeds, "n_generations": n_gen} if args.smoke else {}
-            res = run_condition(a, ax, lv, out_dir, mon=mon, index=i, **kw)
+            res = run_condition(a, ax, lv, out_dir, mon=mon, index=i, code_commit=sha, **kw)
             if res is None:
                 skipped += 1
                 continue

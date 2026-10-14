@@ -65,6 +65,13 @@ preflight() {
     say "STOPPED: this machine has not passed the check. Run  bash scripts/a6000/check.sh  and let it pass."
     exit 2
   fi
+  # D-066: a check passed by OTHER code certifies nothing about this code. After a git pull that changed the
+  # code, the marker names the old commit and the run refuses until the check has passed again.
+  if [ "$SMOKE" = 0 ] && ! grep -q "verified commit $SHA" results/MACHINE_VERIFIED; then
+    say "STOPPED: the machine check was passed by different code than is here now (the code was updated)."
+    say "Run  bash scripts/a6000/check.sh  again and let it pass. Nothing has been lost."
+    exit 2
+  fi
   if ! gpu_probe "$PY" >"$OUT/gpu_probe.txt" 2>&1; then
     tail -n 3 "$OUT/gpu_probe.txt" | tee -a "$RUNLOG"
     say "STOPPED: JAX cannot use the GPU from this terminal. Check that nvidia-smi works, then run again."
@@ -173,6 +180,7 @@ baselines() {
   tail -n 12 results/pairing_power.log | tee -a "$RUNLOG"
   {
     echo "baselines done $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "verified commit $SHA"
     echo "S5: $(tail -n 1 results/s5.log)"
     echo "S6: $(tail -n 1 results/s6.log)"
   } >results/BASELINES_DONE
@@ -182,6 +190,11 @@ baselines() {
 sweep() {
   if [ "$SMOKE" = 0 ] && [ ! -f results/BASELINES_DONE ]; then
     say "STOPPED: run  bash scripts/a6000/run.sh baselines  first."
+    exit 2
+  fi
+  if [ "$SMOKE" = 0 ] && ! grep -q "verified commit $SHA" results/BASELINES_DONE; then
+    say "STOPPED: the baselines were run by different code than is here now (the code was updated)."
+    say "Delete the old output with  rm -rf runs/sweep results/BASELINES_DONE  and run the baselines again."
     exit 2
   fi
   local free

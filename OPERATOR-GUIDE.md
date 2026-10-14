@@ -471,6 +471,9 @@ minutes of work.
 | `STOPPED (exit 3): the disk is nearly full` | Free disk space, then run the same command. Nothing is lost |
 | `STOPPED: JAX cannot use the GPU from this terminal` | Check `nvidia-smi` works. If it does not, the driver needs attention from an administrator. Then run again |
 | `STOPPED: a shipped file has been changed` | Undo it with `git checkout -- .` and run again |
+| `STOPPED: the machine check was passed by different code` | The code was updated since the check. Run `bash scripts/a6000/check.sh` again, then continue |
+| `STOPPED: the baselines were run by different code` | The code was updated since the baselines. Run `rm -rf runs/sweep results/BASELINES_DONE`, then the baselines again |
+| `CODE MISMATCH` in `sweep.log` | Same cause and same fix as the line above: output from older code is never mixed into a run |
 | `STOPPED (exit 2)` for any other reason, or `8 attempts in a row` | **Do not retry.** Send `runs/sweep/sweep.log`, `runs/sweep/run.log` and the `results` folder |
 | `another sweep is already running` | A copy is still going. `tmux attach -t gone` to find it. Do not start a second one |
 
@@ -478,6 +481,32 @@ minutes of work.
 - edit, move or delete any file in the repository or in `runs/sweep`;
 - run anything else on the GPU;
 - start a second copy.
+
+---
+
+## If the project team updates the code
+
+You will be told if this happens. **Do not update in the middle of the sweep** unless told to.
+
+```bash
+cd ~/g-one-a6000
+```
+```bash
+git pull
+```
+
+**Why.** It brings the new code. The run scripts then refuse to use anything produced by the old code: the
+machine check, the baselines, and every checkpoint record which version of the code made them.
+
+**Then, in order:**
+
+1. `bash scripts/a6000/check.sh`. The old check certified the old code only.
+2. `rm -rf runs/sweep results/BASELINES_DONE`, to remove the old baselines. Results from two versions of the
+   experiment must never be combined, and the sweep refuses to try.
+3. `bash scripts/a6000/run.sh baselines`, and continue from section 4.
+
+**Expected.** `git pull` prints a list of changed files and ends at the prompt. If it says
+`Your local changes would be overwritten`, a file was edited by mistake: run `git checkout -- .` and pull again.
 
 ---
 

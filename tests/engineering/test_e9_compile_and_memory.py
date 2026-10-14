@@ -19,12 +19,22 @@ and could fail on a configuration that actually fits.
 Compile time is measured separately from run time, per the JAX conventions in CLAUDE.md, because the first
 call includes compilation and would otherwise poison the throughput figure.
 
-The metric is `pool_bytes`. `bytes_in_use` reports zero whether preallocation is on or off, and
-`test_runtime_environment.py` records that finding: a memory assertion written against it is inert, which is
-the construction class of green-and-meaningless assertion.
+The metric is `peak_bytes_in_use`, since D-067 moved the allocator to cuda_async. Until then it was BFC's
+`pool_bytes`, which cuda_async does not report. Measured on the A6000, `peak_bytes_in_use` went from 116 MiB
+to 5172 MiB between a 16 MB and a 3 GB workload, so it tracks the workload, and
+`test_the_memory_metric_responds_to_scale` re-checks that here rather than assuming it.
+
+The ceiling is 75 percent of the card, which is what BFC's `bytes_limit` reported whether preallocation was on
+or off (D-008), so the gate asks the same question it always asked. Under cuda_async with preallocation off,
+`bytes_limit` is 0 and is no ceiling at all, so the card's total is read from the driver instead.
 """
 
+import ctypes
+import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +47,20 @@ from src.env import env as E
 from src.env import grid, resources
 from src.env.entropy import PRNGSource
 from src.env.perception import build_vis_table
+
+# XLA's default memory fraction, the ceiling BFC's bytes_limit reported (D-008) and E9 always asserted against.
+CEILING_FRACTION = 0.75
+
+
+def _device_ceiling_bytes():
+    """75 percent of device 0's physical memory, from the CUDA driver, which needs no context."""
+    cu = ctypes.CDLL("libcuda.so.1")
+    assert cu.cuInit(0) == 0, "cuInit failed, so the card's memory cannot be read"
+    dev, total = ctypes.c_int(), ctypes.c_size_t()
+    assert cu.cuDeviceGet(ctypes.byref(dev), 0) == 0
+    assert cu.cuDeviceTotalMem_v2(ctypes.byref(total), dev) == 0
+    return int(CEILING_FRACTION * total.value)
+
 
 pytestmark = pytest.mark.slow  # measured at the mark site below, target scale by construction
 
@@ -65,6 +89,11 @@ def _generation_fn(static, entropy, params):
 @pytest.fixture(scope="module")
 def target_scale():
     """Static world at the real configuration. No shrinking anywhere in this file."""
+    return _target_world()
+
+
+def _target_world():
+    """The fixture's body, callable from the fresh process the metric-response test needs."""
     src.assert_runtime_took_effect()
     key = jax.random.key(0)
     obstacles = grid.make_obstacle_grid(key, P.h, P.w, P.obstacle_density)
@@ -133,12 +162,11 @@ def test_peak_memory_at_target_scale_stays_inside_the_device(target_scale):
 
     jax.block_until_ready(gen(keys, weights))
 
-    stats = jax.devices()[0].memory_stats()
-    pool, limit = stats["pool_bytes"], stats["bytes_limit"]
-    print(f"\n  E9 memory: pool {pool / 2**30:.2f} GiB of limit {limit / 2**30:.2f} GiB")
+    peak, limit = jax.devices()[0].memory_stats()["peak_bytes_in_use"], _device_ceiling_bytes()
+    print(f"\n  E9 memory: peak {peak / 2**30:.2f} GiB of ceiling {limit / 2**30:.2f} GiB")
 
-    assert pool < limit, (
-        f"a generation reserved {pool / 2**30:.2f} GiB against a {limit / 2**30:.2f} GiB ceiling. The "
+    assert peak < limit, (
+        f"a generation peaked at {peak / 2**30:.2f} GiB against a {limit / 2**30:.2f} GiB ceiling. The "
         "experiment does not fit at target scale."
     )
 
@@ -183,38 +211,60 @@ def test_the_generation_actually_simulated_something(target_scale):
     )
 
 
-def test_the_memory_metric_responds_to_scale(target_scale):
+# Run in a fresh process by the test below. Small generation first, then full, so the high-water mark can
+# only show a response if the metric really tracks the workload.
+_RESPONSE_SCRIPT = """
+import json, jax
+from configs.default import DEFAULT as P
+from src.agent import network as net
+from src.env.entropy import PRNGSource
+from tests.engineering.test_e9_compile_and_memory import _generation_fn, _target_world
+
+static, _, _ = _target_world()
+gen = _generation_fn(static, PRNGSource(jax.random.key(3)), P)
+peaks = {}
+for pop in (max(P.p_pop // 8, 1), P.p_pop):
+    w = jax.vmap(lambda k: net.init_params(k, P))(jax.random.split(jax.random.key(11), pop))
+    k = jax.random.split(jax.random.key(12), pop * P.n_episodes).reshape(pop, P.n_episodes)
+    jax.block_until_ready(gen(k, w))
+    peaks[pop] = jax.devices()[0].memory_stats()["peak_bytes_in_use"]
+print("PEAKS " + json.dumps(peaks))
+"""
+
+
+def test_the_memory_metric_responds_to_scale():
     """**Verify the metric can see the condition before asserting on it.**
 
-    `pool_bytes < bytes_limit` passing tells you nothing unless the left side moves when the workload does.
+    `peak_bytes_in_use < ceiling` passing tells you nothing unless the left side moves when the workload does.
     This is the construction class of green-and-meaningless assertion, the one that already caught a
     `bytes_in_use` check in `test_runtime_environment.py`, so it is checked here rather than assumed.
 
-    A generation an eighth the size must reserve measurably less. Compared as a fresh process would be ideal;
-    within one process the pool only grows, so the comparison is made in increasing order of size and the
-    assertion is that the larger workload is not smaller.
+    **It runs in a fresh process, and that is the fix for this test having been inert.** The metric is a
+    high-water mark, and the tests above run the full generation first, so inside this process an
+    eight-times-smaller generation reads the same peak as the full one and `full >= small` passes whatever
+    the metric does. Found at D-067 when the response printed 1316 MiB for both. The same was true of
+    `pool_bytes` before it, which also only grows. In a fresh process the small generation runs first, and the
+    assertion is strict.
     """
-    static, _, _ = target_scale
-    entropy = PRNGSource(jax.random.key(3))
-    gen = _generation_fn(static, entropy, P)
-
-    small_pop = max(P.p_pop // 8, 1)
-    w_small = jax.vmap(lambda k: net.init_params(k, P))(jax.random.split(jax.random.key(11), small_pop))
-    k_small = jax.random.split(jax.random.key(12), small_pop * P.n_episodes).reshape(small_pop, P.n_episodes)
-    jax.block_until_ready(gen(k_small, w_small))
-    small_pool = jax.devices()[0].memory_stats()["pool_bytes"]
-
-    w_full = jax.vmap(lambda k: net.init_params(k, P))(jax.random.split(jax.random.key(1), P.p_pop))
-    k_full = jax.random.split(jax.random.key(2), P.p_pop * P.n_episodes).reshape(P.p_pop, P.n_episodes)
-    jax.block_until_ready(gen(k_full, w_full))
-    full_pool = jax.devices()[0].memory_stats()["pool_bytes"]
+    out = subprocess.run(
+        [sys.executable, "-c", _RESPONSE_SCRIPT],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    lines = [line for line in out.stdout.splitlines() if line.startswith("PEAKS ")]
+    assert out.returncode == 0 and lines, f"the fresh-process measurement failed:\n{out.stderr[-2000:]}"
+    peaks = {int(k): v for k, v in json.loads(lines[-1][len("PEAKS ") :]).items()}
+    (small_pop, small_peak), (full_pop, full_peak) = sorted(peaks.items())
 
     print(
-        f"\n  E9 metric response: pool at p_pop {small_pop} = {small_pool / 2**20:.0f} MiB, "
-        f"at p_pop {P.p_pop} = {full_pool / 2**20:.0f} MiB"
+        f"\n  E9 metric response, fresh process: peak at p_pop {small_pop} = {small_peak / 2**20:.0f} MiB, "
+        f"at p_pop {full_pop} = {full_peak / 2**20:.0f} MiB"
     )
-    assert full_pool >= small_pool, (
-        f"an eight-times-larger generation reserved {full_pool / 2**20:.0f} MiB against "
-        f"{small_pool / 2**20:.0f} MiB for the small one. pool_bytes is not tracking the workload, so the "
-        "memory assertion in this file cannot see the condition it claims to guard."
+    assert full_peak > small_peak, (
+        f"an eight-times-larger generation peaked at {full_peak / 2**20:.0f} MiB against "
+        f"{small_peak / 2**20:.0f} MiB for the small one, in a process where it ran second. "
+        "peak_bytes_in_use is not tracking the workload, so the memory assertion in this file cannot see the "
+        "condition it claims to guard."
     )

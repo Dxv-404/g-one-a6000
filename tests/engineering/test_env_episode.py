@@ -300,7 +300,41 @@ def test_the_distant_detection_draw_actually_reaches_the_scan():
 # polarity rule, and this test is why it matters: it was written when every accumulator was a count, and it
 # broke the moment the set grew a second kind. Adding the new fields to a positive whitelist would have to be
 # repeated every time; this way only a genuinely new KIND needs an edit.
-SUM_ACCUMULATORS = frozenset({"dist_sum_visible", "nn_sum_visible", "nn_sum_unseen", "density_sum"})
+SUM_ACCUMULATORS = frozenset(
+    {
+        "dist_sum_visible",
+        "nn_sum_visible",
+        "nn_sum_unseen",
+        "density_sum",
+        "dist_sum_alive",
+        "fid_onset_sum",
+        "fid_dist_sum",
+        "dg_perc_max_sum",
+    }
+)
+
+#: A THIRD kind, D-065: running sums that are signed, because a move toward the predator is a negative
+#: distance change. They are exempt from the non-negativity bound and from nothing else: each is held to
+#: the horizon times the largest change one tick can make. Named explicitly, like the sums above, so a new
+#: accumulator still defaults to the strict count bound.
+SIGNED_SUMS = frozenset(
+    {
+        "dg_perc_emit_sum",
+        "dg_perc_exec_sum",
+        "dg_perc_excess_sum",
+        "dg_a_excess_sum",
+        "dg_b_excess_sum",
+        "dg_occl_emit_sum",
+        "dg_occl_excess_sum",
+        "dg_far_emit_sum",
+        "dg_far_excess_sum",
+        "dg_contact_emit_sum",
+    }
+)
+
+#: The largest Chebyshev distance change one tick can make: a sprint covers two cells. Determined by the
+#: movement rules, not chosen.
+MAX_STEP = 2
 
 
 def test_accumulators_are_bounded_by_the_horizon(static, weights):
@@ -313,10 +347,16 @@ def test_accumulators_are_bounded_by_the_horizon(static, weights):
     span = max(P.h, P.w)
     for name in acc._fields:
         leaf = getattr(acc, name)
+        if name in SIGNED_SUMS:
+            assert bool(jnp.all(jnp.abs(leaf) <= P.t_horizon * MAX_STEP)), (
+                f"{name} moved more than {MAX_STEP} cells of distance per tick on average"
+            )
+            continue
         assert bool(jnp.all(leaf >= 0)), f"{name} went negative"
         if name in SUM_ACCUMULATORS:
-            # Per tick: a distance cannot exceed the grid span, and density cannot exceed the other prey.
-            per_tick = (P.k - 1) if name == "density_sum" else span
+            # Per tick: a distance cannot exceed the grid span, density cannot exceed the other prey, and the
+            # best available distance gain cannot exceed one sprint.
+            per_tick = {"density_sum": P.k - 1, "dg_perc_max_sum": MAX_STEP}.get(name, span)
             assert bool(jnp.all(leaf <= P.t_horizon * per_tick)), (
                 f"{name} exceeded {P.t_horizon} ticks times its per-tick maximum of {per_tick}"
             )
@@ -327,6 +367,10 @@ def test_accumulators_are_bounded_by_the_horizon(static, weights):
         f"SUM_ACCUMULATORS names fields that no longer exist: {SUM_ACCUMULATORS - set(acc._fields)}. "
         "A stale exclusion silently weakens the count bound for nothing."
     )
+    assert SIGNED_SUMS <= set(acc._fields), (
+        f"SIGNED_SUMS names missing fields: {SIGNED_SUMS - set(acc._fields)}"
+    )
+    assert not (SIGNED_SUMS & SUM_ACCUMULATORS), "a field cannot be both a signed and a non-negative sum"
 
     assert bool(jnp.all(acc.still_engaged <= acc.engaged_ticks)), (
         "more still engaged ticks than engaged ticks"

@@ -134,7 +134,38 @@ def descriptors(acc, *, denominator_floor: float) -> dict[str, Descriptor]:
     occlusion_baseline = _rate(g("occluded_far"), g("far_ticks"), f)
 
     # ---- distance maintenance ---------------------------------------------------------------
+    # **`mean_distance` is RETIRED as distancing's evidence and kept only as a report, D-065.** Its
+    # denominator, `visible_ticks`, counts the PREDATOR's detection of the prey, which being hunted causes:
+    # conditioning on it is collider conditioning, and predated prey read 0.45 with 90.6 percent of their
+    # visible ticks adjacent. It measured pursuit.
     mean_distance = _mean(g("dist_sum_visible"), g("visible_ticks"), f)
+
+    # ---- distancing as the prey's OWN distance change, D-065 ----------------------------------
+    # Per perceived tick, how far the prey's emitted move changed its distance from the predator held where
+    # it was, MINUS what a direction chosen at random at the same reach would have changed it: so a
+    # predator-blind policy scores zero in expectation whatever the geometry, and only a direction chosen
+    # BECAUSE of the predator moves it. The far baseline is the same quantity with the predator out of
+    # sight, and the occluded control the same distances with the line of sight blocked, which is the
+    # cleanest contrast (it differs from the perceived ticks only in perception) and the least sampled.
+    dgain_perceived = _mean(g("dg_perc_excess_sum"), g("dg_perc_ticks"), f)
+    dgain_far = _mean(g("dg_far_excess_sum"), g("dg_far_ticks"), f)
+    dgain_occluded = _mean(g("dg_occl_excess_sum"), g("dg_occl_ticks"), f)
+    dgain_band_a = _mean(g("dg_a_excess_sum"), g("dg_a_ticks"), f)
+    dgain_band_b = _mean(g("dg_b_excess_sum"), g("dg_b_ticks"), f)
+    # Reports, not evidence: the raw change carries the geometric bias, the executed change the walls and
+    # the mask, and efficiency is executed gain over the best gain available.
+    dgain_perceived_raw = _mean(g("dg_perc_emit_sum"), g("dg_perc_ticks"), f)
+    dgain_executed = _mean(g("dg_perc_exec_sum"), g("dg_perc_ticks"), f)
+    dgain_efficiency = _rate(g("dg_perc_exec_sum"), g("dg_perc_max_sum"), f)
+    # The OUTCOME form: distance after each tick a predator exists. Reported beside capture, never as
+    # evidence of behaviour, because surviving longer and being far are confounded through survival.
+    mean_distance_alive = _mean(g("dist_sum_alive"), g("pred_present_ticks"), f)
+
+    # ---- the flight-initiation-distance analogue, D-065 ---------------------------------------
+    flight_rate = _rate(g("fid_fled"), g("fid_encounters"), f)
+    flight_initiation_distance = _mean(g("fid_dist_sum"), g("fid_fled"), f)
+    flight_latency = _mean(g("fid_latency_sum"), g("fid_fled"), f)
+    onset_distance = _mean(g("fid_onset_sum"), g("fid_encounters"), f)
 
     # ---- grouping ---------------------------------------------------------------------------
     # The conditional form is baseline MINUS threat, the opposite order to the others, because grouping means
@@ -173,6 +204,21 @@ def descriptors(acc, *, denominator_floor: float) -> dict[str, Descriptor]:
         "occlusion_baseline": occlusion_baseline,
         "conditional_occlusion": _difference(occlusion_near, occlusion_baseline),
         "mean_distance": mean_distance,
+        "dgain_perceived": dgain_perceived,
+        "dgain_far": dgain_far,
+        "dgain_occluded": dgain_occluded,
+        "conditional_dgain": _difference(dgain_perceived, dgain_far),
+        "dgain_sight_contrast": _difference(dgain_perceived, dgain_occluded),
+        "dgain_band_a": dgain_band_a,
+        "dgain_band_b": dgain_band_b,
+        "dgain_perceived_raw": dgain_perceived_raw,
+        "dgain_executed": dgain_executed,
+        "dgain_efficiency": dgain_efficiency,
+        "mean_distance_alive": mean_distance_alive,
+        "flight_rate": flight_rate,
+        "flight_initiation_distance": flight_initiation_distance,
+        "flight_latency": flight_latency,
+        "onset_distance": onset_distance,
         "nn_distance_threat": nn_threat,
         "nn_distance_baseline": nn_baseline,
         "conditional_grouping": conditional_grouping,
@@ -191,12 +237,27 @@ def descriptors(acc, *, denominator_floor: float) -> dict[str, Descriptor]:
 #: fleeing anti-detected) for the self-defeat mechanism documented above; the near forms condition on
 #: geometry the behaviour cannot erase. Fleeing's is the EMITTED-direction form, because the realized form
 #: is erased by pursuit (run 22 diagnostic). Hiding's conditional occlusion was already near/far based,
-#: and distancing and grouping keep their forms until the battery says otherwise.
+#: and grouping keeps its form until the battery says otherwise.
+#:
+#: **Distancing points at `conditional_dgain`, D-065, chosen by the planted battery (run 39).** The prey's
+#: own chance-corrected distance change on perceived ticks, minus the same on far ticks. Over 32 worlds per
+#: policy it detected the planted distancer at z 2.39 (default) and 2.27 (high pressure), against
+#: `mean_distance`'s 1.11 and 1.24, which it replaces as evidence.
+#:
+#: **And it carries a residual bias that no accumulator removes, stated here so nobody reads its zero as
+#: "no avoidance".** Predator-blind policies with a persistent heading score NEGATIVE on it (forager -0.37,
+#: idlers -0.28 and -0.20 at the default): a prey that keeps its heading tends to bring itself into view of
+#: a predator BY heading toward it, so conditioning on perception selects ticks where it already was. Any
+#: perception-conditioned movement measure inherits this; the occluded contrast,
+#: `dgain_sight_contrast`, reduces it most and is reported as the within-prey control, but is defined for
+#: about half the prey. **The control that removes it is the design's own: every lineage is compared with
+#: the paired predator-naive lineage, which has the same selection.** Never read this descriptor against
+#: zero.
 NAMED_STRATEGIES: dict[str, str] = {
     "freezing": "conditional_stillness_near",
     "fleeing": "conditional_away_near",
     "hiding": "conditional_occlusion",
-    "distancing": "mean_distance",
+    "distancing": "conditional_dgain",
     "grouping": "conditional_grouping",
 }
 
@@ -213,39 +274,14 @@ def population(accs, *, denominator_floor: float) -> dict[str, np.ndarray]:
             getattr(accs, "alive_ticks", None) if hasattr(accs, "alive_ticks") else accs["alive_ticks"]
         )
     )
+    # **Every field the accumulators carry, not a hand-kept list.** The list this replaced named 28 fields
+    # and would have silently dropped every D-065 field, so a descriptor reading one would have raised far
+    # from the cause, or worse, read a default. Reading the fields that exist cannot fall behind them.
+    names = list(accs._fields) if hasattr(accs, "_fields") else list(accs)
     rows = []
     for i in range(n):
         row = {}
-        for name in (
-            "engaged_ticks",
-            "still_engaged",
-            "accidental_still",
-            "unthreatened_ticks",
-            "still_unthreatened",
-            "alive_ticks",
-            "moved_ticks",
-            "visible_ticks",
-            "flee_engaged",
-            "visible_unengaged_ticks",
-            "flee_visible_unengaged",
-            "near_ticks",
-            "occluded_near",
-            "far_ticks",
-            "occluded_far",
-            "dist_sum_visible",
-            "nn_sum_visible",
-            "nn_visible_ticks",
-            "nn_sum_unseen",
-            "nn_unseen_ticks",
-            "density_sum",
-            "still_near",
-            "accidental_still_near",
-            "flee_near",
-            "still_far",
-            "flee_far",
-            "away_near",
-            "away_far",
-        ):
+        for name in names:
             v = getattr(accs, name) if hasattr(accs, name) else accs[name]
             row[name] = np.asarray(v)[i]
         rows.append(descriptors(row, denominator_floor=denominator_floor))

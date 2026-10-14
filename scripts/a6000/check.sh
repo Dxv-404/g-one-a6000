@@ -32,26 +32,35 @@ trap 'echo; echo "CHECK STOPPED by Ctrl-C. Nothing was certified. Run  bash scri
 
 say() { echo "$(date '+%H:%M:%S')  $*"; }
 
-# step <required: yes|no> <name> <log file> <command...>
+# step <required: yes|no> <time limit, seconds> <name> <log file> <command...>
+#
+# Every step is bounded. Without a bound a hang is indistinguishable from a slow step, and on 2026-10-14 the
+# E0 step hung inside JAX's allocator for four hours with nothing printed (D-067). A limit is roughly five
+# times the step's duration measured on the A6000 in session 22, so a slow machine still passes and a hang
+# fails within the hour. The command runs under `timeout` through `bash -c`, so shell functions work too;
+# the functions and the variables they read are exported below. Exit 124 is the timeout.
 step() {
-  local required=$1 name=$2 log=$3
-  shift 3
+  local required=$1 limit=$2 name=$3 log=$4
+  shift 4
   local t0 rc dt
   t0=$(date +%s)
   echo
-  say "=== $name"
+  say "=== $name   (limit ${limit}s)"
   say "    full output: $OUT/$log"
-  "$@" >"$OUT/$log" 2>&1
+  timeout --kill-after=60 "$limit" bash -c '"$@"' step "$@" >"$OUT/$log" 2>&1
   rc=$?
   dt=$(($(date +%s) - t0))
+  [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && echo "TIMED OUT after ${limit}s: killed as a hang, not a failure of the code" >>"$OUT/$log"
   tail -n 4 "$OUT/$log" | sed 's/^/      /'
+  local why="exit $rc"
+  [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] && why="TIMED OUT at ${limit}s"
   if [ "$rc" -eq 0 ]; then
     SUMMARY+=("$(printf 'PASS  %5ds  %s' "$dt" "$name")")
   elif [ "$required" = yes ]; then
-    SUMMARY+=("$(printf 'FAIL  %5ds  %s  (exit %s)' "$dt" "$name" "$rc")")
+    SUMMARY+=("$(printf 'FAIL  %5ds  %s  (%s)' "$dt" "$name" "$why")")
     FAILED="$name"
   else
-    SUMMARY+=("$(printf 'NOTE  %5ds  %s  (exit %s, measurement only)' "$dt" "$name" "$rc")")
+    SUMMARY+=("$(printf 'NOTE  %5ds  %s  (%s, measurement only)' "$dt" "$name" "$why")")
   fi
   return "$rc"
 }
@@ -151,21 +160,27 @@ EOF
   rm -rf runs/smoke-check
 }
 
+# The step bodies run in a child bash under `timeout`, which sees only exported functions and variables.
+export ROOT SHA PY
+export -f machine_facts need_space on_linux_filesystem smoke_twice
+
 say "machine check for the A6000 run, commit $SHA. Results in $OUT"
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi not found: no NVIDIA driver. Stop here."; exit 1; }
 command -v uv >/dev/null || { echo "uv not found. Install it first:  curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
 
-step yes "machine facts" 00-machine.log machine_facts || finish
-step yes "folder on a Linux filesystem" 01-filesystem.log on_linux_filesystem || finish
-step yes "every file as shipped (checksums)" 02-manifest.log sha256sum -c --quiet COPY-MANIFEST.sha256 || finish
-step yes "disk space" 03-disk.log need_space || finish
-step yes "environment from the lock file (first time downloads about 3 GB)" 04-uv-sync.log uv sync --frozen || finish
-step yes "the GPU is used, not the CPU (gate E0)" 05-e0.log "$PY" -m pytest tests/engineering/test_e0_setup.py -q || finish
-step yes "engineering tests" 06-engineering.log "$PY" -m pytest tests/engineering -q "${DESELECT_ENG[@]}" || finish
-step yes "differential tests against the reference implementation" 07-differential.log "$PY" -m pytest tests/differential -q || finish
-step yes "scientific tests" 08-scientific.log "$PY" -m pytest tests/scientific -q "${DESELECT_SCI[@]}" || finish
-step yes "the sweep at toy size, twice, to prove resume" 09-smoke.log smoke_twice || finish
-step no "speed under sustained load (15 minutes)" 10-sustained.log "$PY" -u scripts/measure/sustained_load.py --minutes 15
-step no "speed against batch size" 11-batch.log "$PY" -u scripts/measure/batch_scaling.py
-step no "where a tick's time goes" 12-profile.log "$PY" -u scripts/measure/tick_profile.py
+# Limits: measured on the A6000 in session 22 where shown, then about five times that.
+#   engineering 725s, differential 1018s, scientific 95s, E0 under 30s. uv sync's first run downloads 3 GB.
+step yes 300 "machine facts" 00-machine.log machine_facts || finish
+step yes 60 "folder on a Linux filesystem" 01-filesystem.log on_linux_filesystem || finish
+step yes 600 "every file as shipped (checksums)" 02-manifest.log sha256sum -c --quiet COPY-MANIFEST.sha256 || finish
+step yes 60 "disk space" 03-disk.log need_space || finish
+step yes 3600 "environment from the lock file (first time downloads about 3 GB)" 04-uv-sync.log uv sync --frozen || finish
+step yes 600 "the GPU is used, not the CPU (gate E0)" 05-e0.log "$PY" -m pytest tests/engineering/test_e0_setup.py -q || finish
+step yes 4500 "engineering tests" 06-engineering.log "$PY" -m pytest tests/engineering -q "${DESELECT_ENG[@]}" || finish
+step yes 5400 "differential tests against the reference implementation" 07-differential.log "$PY" -m pytest tests/differential -q || finish
+step yes 1800 "scientific tests" 08-scientific.log "$PY" -m pytest tests/scientific -q "${DESELECT_SCI[@]}" || finish
+step yes 5400 "the sweep at toy size, twice, to prove resume" 09-smoke.log smoke_twice || finish
+step no 2700 "speed under sustained load (15 minutes)" 10-sustained.log "$PY" -u scripts/measure/sustained_load.py --minutes 15
+step no 5400 "speed against batch size" 11-batch.log "$PY" -u scripts/measure/batch_scaling.py
+step no 3600 "where a tick's time goes" 12-profile.log "$PY" -u scripts/measure/tick_profile.py
 finish

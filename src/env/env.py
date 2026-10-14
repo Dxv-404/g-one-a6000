@@ -62,7 +62,7 @@ from src.agent import network as net
 from src.env import dynamics, predator, resources
 from src.env import entropy as ent
 from src.env.grid import resolve_move
-from src.env.observation import build_observation
+from src.env.observation import CH_PREDATOR, build_observation
 
 # Eight-direction offsets, indexed by action. Move actions are 0 to 7 and sprints 8 to 15, sharing the same
 # direction table, which is why the sprint index is taken modulo eight.
@@ -97,6 +97,12 @@ class EnvState(NamedTuple):
     # which are exactly the ones most likely to be caught. See the docstring on `resolve_deaths`.
     prey_died_starving: Array
     prey_died_predated: Array
+    # The encounter state behind the flight-initiation analogue, D-065. Per prey, closed at every reset and
+    # never read by the policy or the observation: it exists only so an encounter is counted once and the
+    # FIRST flight inside it is timed. Invariant I3 is untouched because it starts closed every episode.
+    prey_enc_open: Array
+    prey_enc_fled: Array
+    prey_enc_age: Array
 
     pred_pos: Array
     pred_stamina: Array
@@ -187,6 +193,62 @@ class Accumulators(NamedTuple):
     away_near: Array
     away_far: Array
 
+    # ---- distancing as the prey's OWN distance change, D-065 --------------------------------
+    # `dist_sum_visible` conditioned on the predator's DETECTION of the prey, which is caused by being
+    # hunted, so it measured pursuit rather than the prey (collider conditioning; predated prey sat at 0.45
+    # with 90.6 percent of visible ticks adjacent). These measure what the prey's own choice did instead:
+    #
+    #     d0     Chebyshev distance from the prey's START-of-tick cell to the nearest predator's
+    #            START-of-tick cell, the state the prey perceived when it chose
+    #     emit   d(start + the EMITTED displacement, predators held) - d0. A sprint is two cells. Intent:
+    #            a move blocked by a wall still counts as the attempt, D-031's rule
+    #     exec   d(the cell actually reached, predators held) - d0. The second witness
+    #     max    the best exec any action available this tick could have achieved, >= 0 because stay is
+    #            always available. Normalises for walls and exhausted stamina
+    #
+    # The stimulus is PERCEPTION, read from the prey's own observation: a predator in its patch, in line of
+    # sight. Ticks are partitioned by d0 into contact (d0 <= 1), perceived (2 <= d0 <= r), occluded (the
+    # same distances, not perceived) and far (d0 > r), and together they count `pred_present_ticks`.
+    # Perceived ticks split again at r_near into band a and band b, both from existing parameters, and
+    # the band sums are chance-corrected, because the band-standardised comparison is of that measure.
+    dg_perc_ticks: Array
+    dg_perc_moves: Array  # perceived ticks on which the emitted action had a displacement at all
+    dg_perc_emit_sum: Array  # float, signed
+    dg_perc_exec_sum: Array  # float, signed
+    dg_perc_max_sum: Array  # float, >= 0
+    # **The chance correction, and why the raw emit sum is biased.** Under Chebyshev distance a RANDOM
+    # direction is not neutral: with the predator on a diagonal, five of the eight moves increase distance
+    # and one decreases it, so a predator-blind walker scores +0.5 per move. `excess` subtracts, every tick,
+    # the mean change over all eight directions at the emitted reach from the same start cell, so a
+    # direction chosen without regard to the predator scores zero in expectation whatever the geometry.
+    dg_perc_excess_sum: Array  # float, signed
+    dg_a_ticks: Array
+    dg_a_excess_sum: Array  # float, signed
+    dg_b_ticks: Array
+    dg_b_excess_sum: Array  # float, signed
+    dg_occl_ticks: Array
+    dg_occl_emit_sum: Array  # float, signed
+    dg_occl_excess_sum: Array  # float, signed
+    dg_far_ticks: Array
+    dg_far_emit_sum: Array  # float, signed
+    dg_far_excess_sum: Array  # float, signed
+    dg_contact_ticks: Array
+    dg_contact_emit_sum: Array  # float, signed
+    pred_present_ticks: Array  # acting ticks with any predator in the world; the partition's total
+    dist_sum_alive: Array  # float. The OUTCOME form: nearest distance after the tick, every present tick
+
+    # ---- the flight-initiation-distance analogue, D-065 -------------------------------------
+    # An encounter opens on a tick the prey perceives a predator after a tick it did not, and closes when
+    # perception is lost or the prey dies. The first emitted move that increases d0 inside it is the flight:
+    # its d0 is the flight initiation distance and the ticks since onset its latency. An encounter still open
+    # and unfled at the horizon is censored, and is fid_encounters - fid_fled - fid_unfled_closed.
+    fid_encounters: Array
+    fid_fled: Array
+    fid_unfled_closed: Array
+    fid_onset_sum: Array  # float. d0 at each onset
+    fid_dist_sum: Array  # float. d0 at each flight
+    fid_latency_sum: Array  # ticks from onset to flight, summed over flights; bounded by the horizon
+
 
 def zero_accumulators(k: int) -> Accumulators:
     """Counts are int32 and running sums are float32. Both start at exactly zero."""
@@ -221,6 +283,32 @@ def zero_accumulators(k: int) -> Accumulators:
         flee_far=z,
         away_near=z,
         away_far=z,
+        dg_perc_ticks=z,
+        dg_perc_moves=z,
+        dg_perc_emit_sum=f,
+        dg_perc_exec_sum=f,
+        dg_perc_max_sum=f,
+        dg_perc_excess_sum=f,
+        dg_a_ticks=z,
+        dg_a_excess_sum=f,
+        dg_b_ticks=z,
+        dg_b_excess_sum=f,
+        dg_occl_ticks=z,
+        dg_occl_emit_sum=f,
+        dg_occl_excess_sum=f,
+        dg_far_ticks=z,
+        dg_far_emit_sum=f,
+        dg_far_excess_sum=f,
+        dg_contact_ticks=z,
+        dg_contact_emit_sum=f,
+        pred_present_ticks=z,
+        dist_sum_alive=f,
+        fid_encounters=z,
+        fid_fled=z,
+        fid_unfled_closed=z,
+        fid_onset_sum=f,
+        fid_dist_sum=f,
+        fid_latency_sum=z,
     )
 
 
@@ -351,6 +439,9 @@ def reset(entropy, static: StaticEnv, params) -> EnvState:
         prey_death_step=jnp.full((k,), -1, jnp.int32),
         prey_died_starving=jnp.zeros((k,), bool),
         prey_died_predated=jnp.zeros((k,), bool),
+        prey_enc_open=jnp.zeros((k,), bool),
+        prey_enc_fled=jnp.zeros((k,), bool),
+        prey_enc_age=jnp.zeros((k,), jnp.int32),
         pred_pos=pred_pos,
         pred_stamina=jnp.full((params.n_pred,), params.s_max, jnp.float32),
         pred_target=jnp.full((params.n_pred,), predator.NO_TARGET, jnp.int32),
@@ -636,6 +727,72 @@ def tick(
     has_neighbour = jnp.any(other_alive, axis=1) & acting
     density = jnp.sum(other_alive & (pair <= params.r_group), axis=1)
 
+    # ---- distancing as the prey's own distance change, D-065 ----------------------------------------
+    # Perception is read from the observation the policy actually received, so the stimulus is exactly
+    # what the network saw rather than a re-derivation that could drift from it.
+    n_patch = params.s_patch * params.s_patch
+    patch_pred = obs[:, : n_patch * params.c_channels].reshape(k, n_patch, params.c_channels)[
+        :, :, CH_PREDATOR
+    ]
+    perceived = jnp.any(patch_pred > 0, axis=1)
+
+    present = acting & (d_prev < far_sentinel)
+    contact = present & (d_prev <= 1)
+    perc = present & perceived & (d_prev >= 2)
+    occl = present & ~perceived & (d_prev >= 2) & (d_prev <= params.r)
+    far = present & (d_prev > params.r)
+    band_a = perc & (d_prev <= params.r_near)
+    band_b = perc & (d_prev > params.r_near)
+
+    # The EMITTED displacement: one cell for a move, two for a sprint, none for anything else.
+    emit_step = jnp.where(dynamics.is_burst(action_emitted), 2, 1)[:, None] * DIRECTIONS[emit_dir]
+    emit_disp = jnp.where(emit_directional[:, None], emit_step, 0)
+    dd_emit = _nearest_pred(state.prey_pos + emit_disp, state.pred_pos) - d_prev
+    dd_exec = _nearest_pred(prey_pos, state.pred_pos) - d_prev
+
+    # Chance: the mean change over all eight directions at the emitted reach, from the same start cell.
+    reach = jnp.where(dynamics.is_burst(action_emitted), 2, 1)
+    every_dest = state.prey_pos[:, None, :] + reach[:, None, None] * DIRECTIONS[None, :, :]
+    every_dd = jax.vmap(lambda dest: _nearest_pred(dest, state.pred_pos), in_axes=1, out_axes=1)(every_dest)
+    chance = jnp.mean((every_dd - d_prev[:, None]).astype(jnp.float32), axis=1)
+    dd_excess = jnp.where(emit_directional, dd_emit.astype(jnp.float32) - chance, 0.0)
+
+    # The best exec available: every move and sprint, masked exactly as step 3 masks, then resolved
+    # exactly as step 4 resolves. Stay contributes zero, so the maximum is never negative.
+    def _gain_of(candidate):
+        cand_exec, _ = dynamics.mask_actions(
+            jnp.full((k,), candidate, jnp.int32), state.prey_energy, state.prey_stamina, params
+        )
+        dest = jax.vmap(resolve_move, in_axes=(None, 0, 0, 0))(
+            static.obstacles,
+            state.prey_pos,
+            jax.vmap(_direction_of)(cand_exec),
+            dynamics.is_burst(cand_exec),
+        )
+        return _nearest_pred(dest, state.pred_pos) - d_prev
+
+    gains = jax.vmap(_gain_of)(jnp.arange(dynamics.ACTION_SPRINT_LAST + 1, dtype=jnp.int32))
+    dd_max = jnp.maximum(jnp.max(gains, axis=0), 0)
+
+    # ---- the flight-initiation analogue's encounter state ----------------------------------------------
+    lost = acting & state.prey_enc_open & ~perceived
+    unfled_lost = lost & ~state.prey_enc_fled
+    open_kept = state.prey_enc_open & ~lost
+    onset = acting & perceived & ~open_kept
+    enc_open = open_kept | onset
+    enc_fled = jnp.where(onset, False, state.prey_enc_fled)
+    enc_age = jnp.where(onset, 0, state.prey_enc_age)
+    flight = acting & enc_open & ~enc_fled & (dd_emit > 0)
+    enc_fled = enc_fled | flight
+    died_now = acting & ~alive
+    unfled_died = died_now & enc_open & ~enc_fled
+    enc_open_next = enc_open & ~died_now
+    enc_fled_next = enc_fled & enc_open_next
+    enc_age_next = jnp.where(enc_open_next, enc_age + 1, 0)
+
+    def _fsum(mask, value):
+        return jnp.where(mask, value, 0).astype(jnp.float32)
+
     acc = Accumulators(
         engaged_ticks=acc.engaged_ticks + engaged,
         still_engaged=acc.still_engaged + (emitted_stay & engaged),
@@ -673,6 +830,34 @@ def tick(
         flee_far=acc.flee_far + (dist_increased & ~near & acting),
         away_near=acc.away_near + (away & near & acting),
         away_far=acc.away_far + (away & ~near & acting),
+        # distancing as the prey's own distance change, D-065
+        dg_perc_ticks=acc.dg_perc_ticks + perc,
+        dg_perc_moves=acc.dg_perc_moves + (perc & emit_directional),
+        dg_perc_emit_sum=acc.dg_perc_emit_sum + _fsum(perc, dd_emit),
+        dg_perc_exec_sum=acc.dg_perc_exec_sum + _fsum(perc, dd_exec),
+        dg_perc_max_sum=acc.dg_perc_max_sum + _fsum(perc, dd_max),
+        dg_perc_excess_sum=acc.dg_perc_excess_sum + _fsum(perc, dd_excess),
+        dg_a_ticks=acc.dg_a_ticks + band_a,
+        dg_a_excess_sum=acc.dg_a_excess_sum + _fsum(band_a, dd_excess),
+        dg_b_ticks=acc.dg_b_ticks + band_b,
+        dg_b_excess_sum=acc.dg_b_excess_sum + _fsum(band_b, dd_excess),
+        dg_occl_ticks=acc.dg_occl_ticks + occl,
+        dg_occl_emit_sum=acc.dg_occl_emit_sum + _fsum(occl, dd_emit),
+        dg_occl_excess_sum=acc.dg_occl_excess_sum + _fsum(occl, dd_excess),
+        dg_far_ticks=acc.dg_far_ticks + far,
+        dg_far_emit_sum=acc.dg_far_emit_sum + _fsum(far, dd_emit),
+        dg_far_excess_sum=acc.dg_far_excess_sum + _fsum(far, dd_excess),
+        dg_contact_ticks=acc.dg_contact_ticks + contact,
+        dg_contact_emit_sum=acc.dg_contact_emit_sum + _fsum(contact, dd_emit),
+        pred_present_ticks=acc.pred_present_ticks + present,
+        dist_sum_alive=acc.dist_sum_alive + _fsum(present, d_now),
+        # the flight-initiation analogue
+        fid_encounters=acc.fid_encounters + onset,
+        fid_fled=acc.fid_fled + flight,
+        fid_unfled_closed=acc.fid_unfled_closed + unfled_lost + unfled_died,
+        fid_onset_sum=acc.fid_onset_sum + _fsum(onset, d_prev),
+        fid_dist_sum=acc.fid_dist_sum + _fsum(flight, d_prev),
+        fid_latency_sum=acc.fid_latency_sum + jnp.where(flight, enc_age, 0),
     )
 
     new_state = EnvState(
@@ -689,6 +874,9 @@ def tick(
         prey_death_step=death_step,
         prey_died_starving=died_starving,
         prey_died_predated=died_predated,
+        prey_enc_open=enc_open_next,
+        prey_enc_fled=enc_fled_next,
+        prey_enc_age=enc_age_next,
         pred_pos=pred["pred_pos"],
         pred_stamina=pred["stamina"],  # DEV-014: was state.pred_stamina, so it never changed
         pred_target=pred["target"],

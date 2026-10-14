@@ -1117,6 +1117,151 @@ def tick(
                 nn_unseen_ticks[i] += 1
                 nn_sum_unseen[i] += best
 
+    # ---- distancing as the prey's OWN distance change, and the flight-initiation analogue, D-065 ----
+    # Written from the specification of D-065, not transcribed from `src/env/`, and perception is DERIVED
+    # differently on purpose: the implementation reads its prey's observation patch, and this asks the
+    # geometry directly, a predator within the observation radius `r` and in line of sight. Two routes to
+    # "what the prey could see", so a disagreement between them is visible here rather than shared.
+    #
+    # Everything is from the START of the tick: the prey's cell and the predators' cells before anyone moved,
+    # which is the state the prey perceived when it chose. The prey's own move is then scored against the
+    # predators held where they were, so the predator's pursuit cannot enter the number.
+    dg_counts = (
+        "dg_perc_ticks",
+        "dg_perc_moves",
+        "dg_a_ticks",
+        "dg_b_ticks",
+        "dg_occl_ticks",
+        "dg_far_ticks",
+        "dg_contact_ticks",
+        "pred_present_ticks",
+        "fid_encounters",
+        "fid_fled",
+        "fid_unfled_closed",
+        "fid_latency_sum",
+    )
+    dg_sums = (
+        "dg_perc_emit_sum",
+        "dg_perc_exec_sum",
+        "dg_perc_max_sum",
+        "dg_perc_excess_sum",
+        "dg_a_excess_sum",
+        "dg_b_excess_sum",
+        "dg_occl_emit_sum",
+        "dg_occl_excess_sum",
+        "dg_far_emit_sum",
+        "dg_far_excess_sum",
+        "dg_contact_emit_sum",
+        "dist_sum_alive",
+        "fid_onset_sum",
+        "fid_dist_sum",
+    )
+    dg = {name: np.zeros(n, dtype=np.int32) for name in dg_counts}
+    dg.update({name: np.zeros(n, dtype=np.float32) for name in dg_sums})
+    enc_open_out = np.array(state["prey_enc_open"], dtype=bool).copy()
+    enc_fled_out = np.array(state["prey_enc_fled"], dtype=bool).copy()
+    enc_age_out = np.array(state["prey_enc_age"], dtype=np.int32).copy()
+
+    for i in range(n):
+        if not bool(acting[i]):
+            continue
+        start = (int(state["prey_pos"][i][0]), int(state["prey_pos"][i][1]))
+        reached = (int(prey_pos[i][0]), int(prey_pos[i][1]))
+        d0 = _nearest(start, prev_positions)
+        present = d0 < FAR
+        perceived = any(
+            chebyshev(start, q) <= params.r and visible(obstacles, start, (int(q[0]), int(q[1])))
+            for q in prev_positions
+        )
+
+        a = int(action_emitted[i])
+        directional = 0 <= a <= 15
+        if directional:
+            step = DIRECTIONS[a % 8]
+            reach = 2 if is_burst(a) else 1
+            dd_emit = _nearest((start[0] + step[0] * reach, start[1] + step[1] * reach), prev_positions) - d0
+            # What a direction chosen at random, at the same reach, would have scored from here.
+            chance = sum(
+                _nearest((start[0] + dr * reach, start[1] + dc * reach), prev_positions) - d0
+                for dr, dc in DIRECTIONS
+            ) / len(DIRECTIONS)
+            dd_excess = dd_emit - chance
+        else:
+            dd_emit = 0
+            dd_excess = 0.0
+        dd_exec = _nearest(reached, prev_positions) - d0
+
+        # The best any available action could have done this tick: every move and sprint, masked and
+        # resolved by this module's own rules. Staying is always available and gains nothing.
+        dd_max = 0
+        for c in range(16):
+            executed, _ = mask_actions(
+                np.array([c]),
+                np.array([state["prey_energy"][i]]),
+                np.array([state["prey_stamina"][i]]),
+                params,
+            )
+            ex = int(executed[0])
+            dest = start
+            if ex <= 15:
+                dest = resolve_move(obstacles, start, DIRECTIONS[ex % 8], is_burst(ex))
+            dd_max = max(dd_max, _nearest(dest, prev_positions) - d0)
+
+        if present:
+            dg["pred_present_ticks"][i] += 1
+            dg["dist_sum_alive"][i] += _nearest(reached, now_positions)
+            if d0 <= 1:
+                dg["dg_contact_ticks"][i] += 1
+                dg["dg_contact_emit_sum"][i] += dd_emit
+            elif d0 > params.r:
+                dg["dg_far_ticks"][i] += 1
+                dg["dg_far_emit_sum"][i] += dd_emit
+                dg["dg_far_excess_sum"][i] += dd_excess
+            elif perceived:
+                dg["dg_perc_ticks"][i] += 1
+                dg["dg_perc_moves"][i] += int(directional)
+                dg["dg_perc_emit_sum"][i] += dd_emit
+                dg["dg_perc_exec_sum"][i] += dd_exec
+                dg["dg_perc_max_sum"][i] += dd_max
+                dg["dg_perc_excess_sum"][i] += dd_excess
+                if d0 <= params.r_near:
+                    dg["dg_a_ticks"][i] += 1
+                    dg["dg_a_excess_sum"][i] += dd_excess
+                else:
+                    dg["dg_b_ticks"][i] += 1
+                    dg["dg_b_excess_sum"][i] += dd_excess
+            else:
+                dg["dg_occl_ticks"][i] += 1
+                dg["dg_occl_emit_sum"][i] += dd_emit
+                dg["dg_occl_excess_sum"][i] += dd_excess
+
+        # The encounter, as a small state machine read straight off the specification.
+        is_open = bool(enc_open_out[i])
+        has_fled = bool(enc_fled_out[i])
+        age = int(enc_age_out[i])
+        if is_open and not perceived:  # perception lost: the encounter ends
+            if not has_fled:
+                dg["fid_unfled_closed"][i] += 1
+            is_open = False
+        if perceived and not is_open:  # onset
+            dg["fid_encounters"][i] += 1
+            dg["fid_onset_sum"][i] += d0
+            is_open, has_fled, age = True, False, 0
+        if is_open and not has_fled and dd_emit > 0:  # the first flight inside this encounter
+            dg["fid_fled"][i] += 1
+            dg["fid_dist_sum"][i] += d0
+            dg["fid_latency_sum"][i] += age
+            has_fled = True
+        if not bool(alive[i]):  # died this tick, having acted: the encounter ends with it
+            if is_open and not has_fled:
+                dg["fid_unfled_closed"][i] += 1
+            is_open = False
+        if is_open:
+            age += 1
+        else:
+            has_fled, age = False, 0
+        enc_open_out[i], enc_fled_out[i], enc_age_out[i] = is_open, has_fled, age
+
     acc = {
         "engaged_ticks": acc["engaged_ticks"] + engaged,
         "still_engaged": acc["still_engaged"] + (emitted_stay & engaged),
@@ -1146,6 +1291,7 @@ def tick(
         "flee_far": acc["flee_far"] + flee_far,
         "away_near": acc["away_near"] + away_near,
         "away_far": acc["away_far"] + away_far,
+        **{name: acc[name] + dg[name] for name in dg_counts + dg_sums},
     }
 
     new_state = {
@@ -1162,6 +1308,9 @@ def tick(
         "prey_death_step": death_step,
         "prey_died_starving": died_starving,
         "prey_died_predated": died_predated,
+        "prey_enc_open": enc_open_out,
+        "prey_enc_fled": enc_fled_out,
+        "prey_enc_age": enc_age_out,
         # Fixed at reset and carried unchanged, exactly as the implementation carries it. Without this the
         # field exists at tick 0 and vanishes at tick 1, which the field-set assertion catches immediately.
         "spawn_relax_level": state["spawn_relax_level"],
@@ -1259,6 +1408,10 @@ def reset_derived(prey_pos, pred_pos, obstacles, food_grid, target_grid, appeara
         "prey_death_step": np.full(k, -1, dtype=np.int32),
         "prey_died_starving": np.zeros(k, dtype=bool),
         "prey_died_predated": np.zeros(k, dtype=bool),
+        # The encounter state of D-065 starts CLOSED every episode, like the hidden state.
+        "prey_enc_open": np.zeros(k, dtype=bool),
+        "prey_enc_fled": np.zeros(k, dtype=bool),
+        "prey_enc_age": np.zeros(k, dtype=np.int32),
         "pred_pos": np.array(pred_pos, dtype=np.int32).reshape(n_pred, 2),
         "pred_stamina": np.full(n_pred, params.s_max, dtype=np.float32),
         "pred_target": np.full(n_pred, NO_TARGET, dtype=np.int32),
@@ -1304,8 +1457,40 @@ def zero_accumulators(k: int) -> dict:
         # the emitted-direction flee event, D-048: intent, which pursuit cannot erase
         "away_near",
         "away_far",
+        # distancing as the prey's own distance change, and the flight-initiation analogue, D-065
+        "dg_perc_ticks",
+        "dg_perc_moves",
+        "dg_a_ticks",
+        "dg_b_ticks",
+        "dg_occl_ticks",
+        "dg_far_ticks",
+        "dg_contact_ticks",
+        "pred_present_ticks",
+        "fid_encounters",
+        "fid_fled",
+        "fid_unfled_closed",
+        "fid_latency_sum",
     )
-    sums = ("dist_sum_visible", "nn_sum_visible", "nn_sum_unseen", "density_sum")
+    sums = (
+        "dist_sum_visible",
+        "nn_sum_visible",
+        "nn_sum_unseen",
+        "density_sum",
+        "dg_perc_emit_sum",
+        "dg_perc_exec_sum",
+        "dg_perc_max_sum",
+        "dg_perc_excess_sum",
+        "dg_a_excess_sum",
+        "dg_b_excess_sum",
+        "dg_occl_emit_sum",
+        "dg_occl_excess_sum",
+        "dg_far_emit_sum",
+        "dg_far_excess_sum",
+        "dg_contact_emit_sum",
+        "dist_sum_alive",
+        "fid_onset_sum",
+        "fid_dist_sum",
+    )
     out = {n: np.zeros(k, dtype=np.int32) for n in counts}
     out.update({n: np.zeros(k, dtype=np.float32) for n in sums})
     return out

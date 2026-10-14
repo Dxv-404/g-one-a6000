@@ -16,7 +16,10 @@ import src
 
 def test_the_forbidden_and_required_sets_are_what_the_project_requires():
     """Transcribed rather than imported, so editing one without the other fails here."""
-    assert src.REQUIRED == {"XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
+    assert src.REQUIRED == {
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+        "XLA_PYTHON_CLIENT_ALLOCATOR": "cuda_async",
+    }
     assert set(src.FORBIDDEN) == {"JAX_ENABLE_X64"}
 
 
@@ -37,29 +40,44 @@ def test_default_float_is_float32_not_float64():
 
 
 def test_preallocation_is_off_observably():
-    """Checked against `pool_bytes`, which is the only one of the three plausible metrics that can see it.
+    """Checked through `src.check_memory_stats`, the guard's own function, on this process's real stats.
 
-    Two wrong answers, both of which look right, and both were tried:
+    Under cuda_async (D-067) the discriminator is `bytes_limit`: measured 0 off against 34550 MiB on. Under
+    BFC it was `pool_bytes`, and `bytes_limit` was the inert one, so the metric that was wrong before is the
+    one that is right now. The history of wrong answers, kept because each looked right:
 
-        bytes_limit   75 percent of the card whether preallocation is on or off. D-008's measured finding
-        bytes_in_use  live allocations only. Zero under both settings, so a check against it passes on a
-                      misconfigured run and is inert by construction rather than by ordering
-        pool_bytes    reserved by the allocator. Measured at 2 MB off against 4226 MB on
-
-    The first version of this test used `bytes_in_use` and was inert. It was caught by trying to break it and
-    finding it would not go red, which is the whole reason a check gets broken deliberately rather than
-    reasoned about.
+        bytes_in_use  live allocations only. Zero under both settings. The first version of this test used it
+                      and was inert, caught by trying to break it and finding it would not go red
+        bytes_limit   inert under BFC (D-008), the discriminator under cuda_async
+        pool_bytes    the discriminator under BFC, absent under cuda_async
     """
     import jax
 
     if jax.devices()[0].platform != "gpu":
         return
-    stats = jax.devices()[0].memory_stats()
-    pool, limit = stats["pool_bytes"], stats["bytes_limit"]
-    assert pool < 0.5 * limit, (
-        f"allocator pool is {pool / 1e6:.0f} MB of a {limit / 1e6:.0f} MB ceiling. Preallocation is on, so "
-        "this process has a different memory ceiling than every recorded result."
-    )
+    observed = src.check_memory_stats(jax.devices()[0].memory_stats())
+    assert observed == {"allocator": "cuda_async", "bytes_limit": 0}
+
+
+def test_the_allocator_check_refuses_bfc_and_preallocation():
+    """The check must be able to fail, and it cannot be broken for real on the A6000: BFC hangs there.
+
+    So it is handed the two dicts it exists to refuse, shaped as measured: BFC's, with `pool_bytes` and its
+    constant 75 percent `bytes_limit` from the laptop, and cuda_async's with preallocation on. Same function
+    the guard runs, so this is coupled to the mechanism rather than to a copy of it.
+    """
+    import pytest
+
+    bfc = {"bytes_in_use": 4096, "pool_bytes": 2 * 2**20, "bytes_limit": 6 * 2**30}
+    with pytest.raises(RuntimeError, match="only the BFC allocator"):
+        src.check_memory_stats(bfc)
+
+    preallocated = {"bytes_in_use": 0, "peak_bytes_in_use": 0, "bytes_limit": 34550 * 2**20}
+    with pytest.raises(RuntimeError, match="Preallocation is on"):
+        src.check_memory_stats(preallocated)
+
+    healthy = {"bytes_in_use": 0, "peak_bytes_in_use": 0, "bytes_limit": 0, "bytes_reserved": 0}
+    assert src.check_memory_stats(healthy)["allocator"] == "cuda_async"
 
 
 def test_the_check_is_reachable_from_outside_pytest():

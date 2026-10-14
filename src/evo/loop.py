@@ -8,8 +8,8 @@ value used here is in `configs/default.py` and passes the design audit.
 
 The scheme, and it is small enough to read in one sitting:
 
-    tournament selection at t_sel, with replacement
-    elitism preserving the top n_elite UNCHANGED, unmutated
+    tournament selection at t_sel, with replacement, ties among candidates uniform at random
+    elitism preserving the top n_elite UNCHANGED, unmutated, ties at the cutoff uniform at random (D-064)
     Gaussian mutation at sigma on everything that is not an elite
     no crossover, matching the deep-neuroevolution convention
 
@@ -61,12 +61,47 @@ def tournament(key: Array, fit: Array, t_sel: int, n: int) -> Array:
     """`n` winners of independent size-`t_sel` tournaments, sampled with replacement.
 
     With replacement because that is the convention and because sampling without it would make the tournament
-    size interact with the population size, which is a coupling nobody asked for. Ties go to the lower index
-    via `argmax`, which is arbitrary but deterministic, and determinism is what E1 and S7 need.
+    size interact with the population size, which is a coupling nobody asked for.
+
+    **Ties go to the first-DRAWN candidate, which is uniform at random over the tied genomes.** `argmax` picks
+    the lowest SLOT among equal values, and the slots hold genomes drawn uniformly, so no genome index is
+    favoured. A previous version of this docstring said "the lower index", which described the slot as if it
+    were the genome and made a sound rule read like a biased one. Measured, D-064: with every fitness equal
+    the winners are uniform over the population.
     """
     candidates = jax.random.randint(key, (n, t_sel), 0, fit.shape[0])
     winners = jnp.argmax(fit[candidates], axis=1)
     return candidates[jnp.arange(n), winners]
+
+
+def elite_indices(key: Array, fit: Array, n_elite: int) -> Array:
+    """The `n_elite` fittest genomes, with ties at the cutoff broken UNIFORMLY AT RANDOM. D-064.
+
+    **`jax.lax.top_k` alone breaks ties toward the lower position**, and elites are written back to
+    positions `0 .. n_elite - 1`, so on any tie at the cutoff the sitting elites won again purely by where
+    they sat. Measured on run 30: the cutoff was tied in 106 of 120 generations, 41 percent of elite slots
+    were decided by the tie-break, the winners were the lowest positions of the tied class in 103 of 103
+    tied generations, and sitting elites won 63 tied slots against 24.8 expected by chance.
+
+    **The fix permutes the population before `top_k` and maps back.** Among equal fitness the order is
+    then the random permutation's, so every tied genome is equally likely to take a slot, and among unequal
+    fitness `top_k` is unchanged: a population with no tie at the cutoff gets exactly the same elite set.
+    Selection still reads `fit` and nothing else, so invariant I1 is untouched.
+    """
+    perm = jax.random.permutation(key, fit.shape[0])
+    return perm[jax.lax.top_k(fit[perm], n_elite)[1]]
+
+
+#: The integer folded into the generation key for the elite tie-break, so the selection and mutation keys
+#: are exactly what they were before D-064 and a generation with no tie at the elite cutoff is bit-identical
+#: to the previous behaviour. An implementation constant.
+#:
+#: **Folded rather than drawn from a wider `split`, and the reason is narrower than it first read.** This
+#: comment said a wider split would change the other two keys. The falsification found that false: under
+#: `jax_threefry_partitionable`, the default here, `split(key, 3)` begins with exactly the keys of
+#: `split(key, 2)`, so the break changed nothing. Folding is kept because it does not rely on that property,
+#: which is a configuration of the key implementation rather than a guarantee.
+ELITE_TIE_FOLD = 1
 
 
 def next_population(key: Array, genomes: Array, fit: Array, params) -> Array:
@@ -79,7 +114,7 @@ def next_population(key: Array, genomes: Array, fit: Array, params) -> Array:
     n_offspring = params.p_pop - n_elite
     k_sel, k_mut = jax.random.split(key)
 
-    elite_idx = jax.lax.top_k(fit, n_elite)[1]
+    elite_idx = elite_indices(jax.random.fold_in(key, ELITE_TIE_FOLD), fit, n_elite)
     elites = genomes[elite_idx]
 
     parents = genomes[tournament(k_sel, fit, params.t_sel, n_offspring)]

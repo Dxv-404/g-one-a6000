@@ -11,6 +11,8 @@ So the setting lives here, at package import, and `tests/conftest.py` imports th
 One implementation, triggered by any entry point that touches the project.
 
     XLA_PYTHON_CLIENT_PREALLOCATE   sets the memory ceiling. Hard-set, not defaulted
+    XLA_PYTHON_CLIENT_ALLOCATOR     cuda_async. Hard-set. JAX 0.11's default BFC allocator hangs forever on
+                                    its first allocation on the A6000 under WSL; see D-067
     XLA_PYTHON_CLIENT_MEM_FRACTION  same, continuously. Left alone; D-008 settled that it stays default
     JAX_ENABLE_X64                  switches float32 to float64, invalidating every tolerance. Refused
     JAX_PLATFORMS                   can force CPU, which looks like a slow GPU rather than a wrong one
@@ -38,6 +40,12 @@ import os
 # about what "default" means, which is the failure being guarded against rather than a courtesy.
 REQUIRED = {
     "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    # D-067. The default BFC allocator in JAX 0.11 maps device memory through CUDA's virtual-memory API and
+    # asks for RDMA-capable memory whenever the driver reports support. The A6000 reports it; under WSL the
+    # mapping then fails in cuMemSetAccess with CUDA_ERROR_UNKNOWN, BFC reads that as out of memory, and it
+    # retries ever smaller sizes forever without raising. cuda_async allocates from CUDA's stream-ordered pool
+    # and never takes that path. Allocation does not touch arithmetic, so no result changes; E1 confirms it.
+    "XLA_PYTHON_CLIENT_ALLOCATOR": "cuda_async",
 }
 
 FORBIDDEN = {
@@ -51,6 +59,7 @@ INHERITED_ENVIRONMENT = {
     k: os.environ.get(k)
     for k in (
         "XLA_PYTHON_CLIENT_PREALLOCATE",
+        "XLA_PYTHON_CLIENT_ALLOCATOR",
         "XLA_PYTHON_CLIENT_MEM_FRACTION",
         "XLA_CLIENT_MEM_FRACTION",
         "JAX_ENABLE_X64",
@@ -199,15 +208,17 @@ def assert_runtime_took_effect() -> dict:
 
     Two observable properties:
 
-    **Preallocation is off**, checked against `pool_bytes`. Two metrics here are the wrong one and it is worth
-    naming both, because each looks right:
+    **The allocator is cuda_async, and preallocation is off.** Both read from `memory_stats()` by
+    `check_memory_stats`, which the gates call too, so a test cannot pass against a copy of the logic. The
+    metrics trade roles between allocators, which is the trap worth naming:
 
-        bytes_limit   75 percent of the card whether preallocation is on or off. D-008's measured finding,
-                      and the reason the obvious check passes on a misconfigured run
-        bytes_in_use  live allocations only. Zero under both settings after a trivial allocation, so a check
-                      against it is inert by construction rather than by import ordering
-        pool_bytes    what the allocator has reserved. Measured: 2 MB with preallocation off, 4226 MB with it
-                      on. This is the discriminator
+        under BFC (before D-067)
+            bytes_limit   75 percent of the card whether preallocation is on or off. D-008's finding
+            pool_bytes    the discriminator. Measured 2 MB off against 4226 MB on
+        under cuda_async (measured on the A6000, D-067)
+            pool_bytes    absent. Its presence means BFC is running, so the allocator setting did not take
+            bytes_limit   the discriminator. Measured 0 off against 34550 MiB on, 75 percent of 46067
+            bytes_in_use  live allocations; zero after a trivial allocation under both settings, so inert
 
     `nvidia-smi` per-process memory would also show it in principle and reports `[N/A]` under WSL, so it is
     not an option here.
@@ -233,15 +244,31 @@ def assert_runtime_took_effect() -> dict:
 
     stats = jax.devices()[0].memory_stats() if observed["platform"] == "gpu" else None
     if stats:
-        observed["pool_bytes"] = int(stats["pool_bytes"])
-        observed["bytes_limit"] = int(stats["bytes_limit"])
-        if observed["pool_bytes"] > 0.5 * observed["bytes_limit"]:
-            raise RuntimeError(
-                f"the allocator has reserved a pool of {observed['pool_bytes'] / 1e6:.0f} MB against a "
-                f"{observed['bytes_limit'] / 1e6:.0f} MB limit after allocating 4 KB. Preallocation is on, so "
-                "this process has a different memory ceiling than the one the gates were verified against and "
-                "than the one M2 records. The likely cause is a JAX operation running before `src` was "
-                "imported: the flag is read when the backend initialises, which is the first operation rather "
-                "than the import."
-            )
+        observed.update(check_memory_stats(stats))
     return observed
+
+
+def check_memory_stats(stats: dict) -> dict:
+    """Raise unless `stats` comes from the cuda_async allocator with preallocation off. Returns what it read.
+
+    Pure, so the gates can hand it a BFC-shaped or preallocated dict and see it refuse, and so the guard and
+    the gates run one implementation rather than two that could drift. Measured values are in the docstring
+    of `assert_runtime_took_effect`.
+    """
+    if "pool_bytes" in stats:
+        raise RuntimeError(
+            f"memory_stats() reports pool_bytes={stats['pool_bytes']}, which only the BFC allocator does. "
+            "XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async did not take effect, so this process allocates through the "
+            "path that hangs on the A6000 under WSL (D-067) and differs from the one the gates were verified "
+            "under. The likely cause is a JAX operation running before `src` was imported."
+        )
+    limit = int(stats.get("bytes_limit", -1))
+    if limit != 0:
+        raise RuntimeError(
+            f"the cuda_async allocator reports bytes_limit={limit}, against 0 when preallocation is off "
+            "(measured 34550 MiB with it on, D-067). Preallocation is on, so this process has a different memory "
+            "ceiling than the one the gates were verified against and than the one M2 records. The likely cause "
+            "is a JAX operation running before `src` was imported: the flag is read when the backend "
+            "initialises, which is the first operation rather than the import."
+        )
+    return {"allocator": "cuda_async", "bytes_limit": limit}

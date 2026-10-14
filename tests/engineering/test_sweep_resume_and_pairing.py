@@ -326,3 +326,61 @@ def test_the_real_null_pass_sees_a_predator_the_lineage_never_did(tmp_path, monk
     assert float(own[:, predated].max()) == 0.0
     assert float(null[near]) > 0.0, "the naive_eval pass put the same weights in a world with a predator"
     assert "near_ticks" in Accumulators._fields  # the column the assertion above reads exists by that name
+
+
+# ------------------------------------------------------------------ D-066: the code-version guard --
+#
+# **Schema equality is not code equality.** D-064 changed selection without changing one column, so the
+# schema guard above would have let a baseline from the old elitism be reused by a sweep running the new
+# one. These pin the guard that names the code instead.
+
+A, B = "a" * 40, "b" * 40
+
+
+def test_a_checkpoint_from_the_same_code_is_reused(tmp_path, stubbed):
+    sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)
+    stubbed.clear()
+    assert sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A) is None
+    assert stubbed == [], "a complete condition from the same code must not be recomputed"
+
+
+def test_a_checkpoint_from_other_code_is_refused_and_the_refusal_is_fatal(tmp_path, stubbed):
+    import sweep_monitor as sm
+
+    sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)
+    with pytest.raises(SystemExit, match="CODE MISMATCH") as e:
+        sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=B)
+    assert sm.exit_code_for(e.value) == sm.EXIT_FATAL, "a restart would repeat it, so it must stop the run"
+
+
+def test_a_partial_seed_from_other_code_is_refused(tmp_path, monkeypatch):
+    """A crash that straddles a code change must not splice an old seed into a new condition."""
+    calls: list = []
+    real = _stub_one_seed(calls)
+    monkeypatch.setattr(sweep, "N_SEEDS", 3)
+    monkeypatch.setattr(sweep, "one_seed", _crashing_after_seed_zero(real))
+    with pytest.raises(RuntimeError):
+        sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)
+    monkeypatch.setattr(sweep, "one_seed", real)
+    with pytest.raises(SystemExit, match="CODE MISMATCH"):
+        sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=B)
+
+
+def test_a_checkpoint_from_before_the_guard_is_refused(tmp_path, stubbed):
+    sweep.run_condition("treatment", "baseline", None, tmp_path)  # written without a code name
+    with pytest.raises(SystemExit, match="before the code-version guard"):
+        sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)
+
+
+def test_the_guard_reads_the_stored_code_name(tmp_path, stubbed):
+    """Coupling to the mechanism: rewrite ONLY the stored name and the verdict follows it. A guard keyed on
+    anything else, the file name or its age, would not change verdict here."""
+    sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)
+    (path,) = tmp_path.glob("*.npz")
+    with np.load(path, allow_pickle=True) as d:
+        fields = {k: d[k] for k in d.files}
+    fields["code_commit"] = np.array(B)
+    np.savez(path, **fields)
+    assert sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=B) is None
+    with pytest.raises(SystemExit, match="CODE MISMATCH"):
+        sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)

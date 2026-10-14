@@ -9,8 +9,8 @@ the characterisation sweep, plus the commands to do it.
 refuse to start if a shipped file has been edited. If something goes wrong, the run either recovers by
 itself or stops with a message saying what to do, and the table at the end lists every message.
 
-    source commit     cace2434e00a0f65739aea5441458e7183fec172
-    verified commit   e6b93b782bcb9fe8df6c920842ccb00d1a665f19   the run code is byte-identical to this commit, which passed
+    source commit     027781bb452de8dadacde5240b2349a0c6b2e920
+    verified commit   7ca0ca2f32d377fa551a0a42d745857907449773   the run code is byte-identical to this commit, which passed
                                            the full differential test tier
 
 **New to this? Read `OPERATOR-GUIDE.md` first.** It walks through every command with why it is there, the output to
@@ -206,6 +206,11 @@ It stops for good only for the reasons below. The last lines of `runs/sweep/swee
 | 0 | Finished | Send the results, below |
 | 1, 4, 5 | A crash, a hang, or memory exhausted. Restarted by itself | Nothing. After eight in a row it stops: send the logs |
 | 2 | A check failed that a restart cannot fix: a changed file, a failed gate, a bad checkpoint | Do not retry. Send `runs/sweep/sweep.log`, `runs/sweep/run.log` and `results/` |
+
+If the code is updated with `git pull`, everything made by the old code is refused rather than reused: the
+machine check, the baselines and every checkpoint record the code version that made them. Run `check.sh`
+again, delete `runs/sweep` and `results/BASELINES_DONE`, and run the baselines again. `OPERATOR-GUIDE.md`
+has the steps.
 | 3 | The disk is nearly full. The run stopped before anything could be damaged | Free space, then run the same command again |
 | 130 | Stopped with Ctrl-C | Run the same command again to continue |
 

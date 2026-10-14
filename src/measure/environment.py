@@ -105,7 +105,7 @@ def _jax_runtime():
         "jax_version": jax.__version__,
         "platform": observed["platform"],
         "default_float_dtype": observed["default_float_dtype"],
-        "pool_bytes": observed.get("pool_bytes", UNKNOWN),
+        "allocator": observed.get("allocator", UNKNOWN),
         "bytes_limit": observed.get("bytes_limit", UNKNOWN),
     }
 
