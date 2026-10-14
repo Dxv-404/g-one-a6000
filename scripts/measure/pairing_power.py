@@ -51,7 +51,8 @@ def per_seed(values: np.ndarray, cols: list[str]) -> dict[str, np.ndarray]:
     out = {name: [] for name in D.NAMED_STRATEGIES.values()}
     defined = {name: [] for name in D.NAMED_STRATEGIES.values()}
     for s in range(values.shape[0]):
-        row = {c: float(values[s, i]) for i, c in enumerate(cols)}
+        # The floor applies to the seed's pooled ticks, not a per-prey average: D-071.
+        row = {c: float(v) for c, v in zip(cols, sweep.pooled(values[s]), strict=True)}
         desc = D.descriptors(row, denominator_floor=DENOM_FLOOR)
         for name in out:
             out[name].append(desc[name].value)

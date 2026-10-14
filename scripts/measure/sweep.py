@@ -86,6 +86,12 @@ from src.evo import genome, loop
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import sweep_monitor as sm  # noqa: E402  host-side reporting only, D-062
 
+#: **Twenty, by owner ruling on Q-051, 2026-10-14, D-070.** The A6000's own baselines measured the freezing
+#: descriptor's cross-arm seed correlation at -0.62, where the laptop's runs 32 and 33 had +0.55, so pairing
+#: ADDS noise here: power to detect a one-null-sd shift is 0.616 at ten seeds, 0.785 at fifteen and 0.858 at
+#: twenty under the paired model, 0.676, 0.848 and 0.935 under the independent one. Twenty is the smallest
+#: count that clears S6's 0.80 under both. The earlier ruling, kept below as the record of what was believed:
+#:
 #: Ten, and the precision is REPORTED rather than assumed. Owner's ruling: doubling to twenty doubles the
 #: whole plan for a factor of 1.41 in precision, and the primary claim routes through tier-one outcomes at
 #: 8,192 prey per generation rather than through cross-seed means. The standard error of each condition's
@@ -94,7 +100,25 @@ import sweep_monitor as sm  # noqa: E402  host-side reporting only, D-062
 #: **If a condition lands near a decision boundary, add seeds for THAT condition** rather than re-running the
 #: sweep. The freeze work established why: a required-n computed from a pilot chases both a moving effect and
 #: a moving bar, so a global re-run at a larger n is the expensive way to answer a local question.
-N_SEEDS = 10
+N_SEEDS = 20
+
+#: What one stored accumulator row pools. Each per-genome row is the mean over one episode's `k` prey
+#: (`make_accumulator_pass`), and a population row is the mean of `p_pop` of those, so a row stands for
+#: `p_pop * k` prey-episodes: 2048 at the defaults.
+POOLED_PREY_EPISODES = DEFAULT.p_pop * DEFAULT.k
+
+
+def pooled(mean_row: np.ndarray) -> np.ndarray:
+    """A population-mean accumulator row as the pooled totals it averages. D-071, owner ruling 2026-10-14.
+
+    Every descriptor is a ratio of two accumulators, so scaling both by the same count leaves every value
+    unchanged; what changes is the denominator floor, which then applies to the ticks the seed actually
+    observed rather than to a per-prey average. Applied to a mean row, a floor of 1.0 demanded one perceived
+    tick per prey-episode, and the A6000's null perceives the predator on 0.13 to 0.80 per prey-episode, about
+    270 to 1630 ticks per seed, so distancing read undefined on every seed while the data were plentiful.
+    """
+    return np.asarray(mean_row, np.float64) * POOLED_PREY_EPISODES
+
 
 #: 300, with the trajectory reported rather than an endpoint. Owner's ruling: neither 300 nor 900 converges,
 #: run 1 measured 300 at 45.9 percent of the 900-generation gain, and choosing 900 buys a longer unfinished

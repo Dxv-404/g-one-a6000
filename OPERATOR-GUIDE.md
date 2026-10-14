@@ -9,8 +9,8 @@ is the walkthrough.
 1. Before you start     what the machine needs                         10 minutes
 2. Set up               WSL on Windows, uv, clone, VS Code, tmux      10 to 40 minutes
 3. Check the machine    bash scripts/a6000/check.sh                    45 to 75 minutes
-4. Baselines            bash scripts/a6000/run.sh baselines            1 to 2 hours
-5. The sweep            bash scripts/a6000/run.sh sweep                about 2 to 3 days, estimated
+4. Baselines            bash scripts/a6000/run.sh baselines            about 2.5 hours
+5. The sweep            bash scripts/a6000/run.sh sweep                about 5.3 to 5.6 days, measured
 6. Send back            runs/sweep and results                         about 80 GB
 ```
 
@@ -342,7 +342,7 @@ bash scripts/a6000/run.sh baselines
 ```
 
 **Why.** Every condition of the sweep is compared against two reference conditions, with the predator and
-without it, ten seeds each. They have to come from **this machine**, because results across different GPUs
+without it, twenty seeds each. They have to come from **this machine**, because results across different GPUs
 are not bitwise identical. After them, three analyses run on their output:
 - gate S5, "is the comparison condition well behaved", which must pass;
 - gate S6, statistical power;
@@ -377,13 +377,14 @@ Then the sweep's header (GPU, driver, commit, where the logs are), and its progr
 ```
 2026-10-14 11:20:00  run.sh  gate S5: is the null well behaved? Required.
 <a pytest summary with "passed">
-2026-10-14 11:21:00  run.sh  gate S6: statistical power at ten seeds. Recorded, not required: ...
+2026-10-14 11:21:00  run.sh  gate S6: statistical power at the planned seed count. Recorded, not required: ...
 <a pytest summary with "failed">
 2026-10-14 11:22:00  run.sh  baselines done. Send results/s5.log, results/s6.log and results/pairing_power.log to the project team.
 ```
 
-**S6 reporting `failed` is expected and is not a fault.** It reports that ten seeds fall short under its
-deliberately conservative assumption. That is the question the team decides from these files, so the run
+**S6 reporting `failed` would not be a fault.** At twenty seeds it is expected to pass (0.935 on the A6000's
+ten-seed baselines); a failure would mean the planned seeds fall short under its deliberately conservative
+assumption. That is the question the team decides from these files, so the run
 does not stop for it.
 
 **Then: send `results/s5.log`, `results/s6.log` and `results/pairing_power.log` to the project team, and
@@ -407,13 +408,13 @@ bash scripts/a6000/run.sh sweep
 Add `--verbose` (`bash scripts/a6000/run.sh sweep --verbose`) for a progress line every generation instead
 of every few; it changes what is printed, never what is computed.
 
-**Why.** This is the experiment: 109 conditions, each one parameter moved away from its default, ten seeds
+**Why.** This is the experiment: 109 conditions, each one parameter moved away from its default, twenty seeds
 of 300 generations each. The two baseline conditions from step 4 are reused, so it starts with 2 of 109
 done.
 
 **Expected.**
 - The same opening lines as step 4.
-- Then `plan: 109 conditions x 10 seeds x 300 generations; 2 conditions already complete`.
+- Then `plan: 109 conditions x 20 seeds x 300 generations; 2 conditions already complete`.
 - Then the progress lines, now with a time remaining on each finished condition:
 
 ```

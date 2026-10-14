@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run the baselines and the sweep on the A6000, unattended. D-061, D-062.
 #
-#   bash scripts/a6000/run.sh baselines    the two baseline conditions, then gates S5 and S6. 1 to 2 hours
-#   bash scripts/a6000/run.sh sweep        the sweep. Needs the baselines. Roughly 2 to 3 days
+#   bash scripts/a6000/run.sh baselines    the two baseline conditions, then gates S5 and S6. About 2.5 hours
+#   bash scripts/a6000/run.sh sweep        the sweep. Needs the baselines. About 5.3 to 5.6 days on the A6000
 #   bash scripts/a6000/run.sh all          both, one after the other
 #   bash scripts/a6000/run.sh all --smoke  the same control flow at toy size, into runs/smoke-run
 #   add --verbose to any of these for a progress line every generation (sweep.py --progress verbose)
@@ -174,15 +174,18 @@ baselines() {
   supervise "the treatment baseline" --arms treatment --limit 1
   supervise "the null baseline" --arms null --limit 1
   say "gate S5: is the null well behaved? Required."
-  if ! "$PY" -m pytest tests/scientific/test_s5_s6_null.py -k s5 -q >results/s5.log 2>&1; then
+  # Selected by "not test_s6", never by "s5": -k matches the module name too, and test_s5_s6_null.py
+  # contains "s5", so "-k s5" also ran S6, which is expected to fail and is only recorded. Found when S5's
+  # first run on the A6000 reported S6's failure among its own, session 22.
+  if ! "$PY" -m pytest tests/scientific/test_s5_s6_null.py -k "not test_s6" -q >results/s5.log 2>&1; then
     tail -n 15 results/s5.log | tee -a "$RUNLOG"
     say "STOPPED: gate S5 failed on this machine's null baseline. Send results/s5.log and $OUT/sweep.log."
     exit 2
   fi
   tail -n 1 results/s5.log | tee -a "$RUNLOG"
-  say "gate S6: statistical power at ten seeds. Recorded, not required: it is expected to FAIL under its"
+  say "gate S6: statistical power at the planned seed count. Recorded, not required: it may FAIL under its"
   say "         conservative assumption, and the seed count is the project owner's decision."
-  "$PY" -m pytest tests/scientific/test_s5_s6_null.py -k s6 -q >results/s6.log 2>&1
+  "$PY" -m pytest tests/scientific/test_s5_s6_null.py -k "test_s6" -q >results/s6.log 2>&1
   tail -n 1 results/s6.log | tee -a "$RUNLOG"
   say "the paired power analysis on this machine's baselines"
   "$PY" -u scripts/measure/pairing_power.py results/pairing_power.npz >results/pairing_power.log 2>&1

@@ -68,7 +68,8 @@ def null_by_seed() -> dict[str, np.ndarray]:
     out: dict[str, list] = {name: [] for name in D.NAMED_STRATEGIES.values()}
     defined: dict[str, list] = {name: [] for name in D.NAMED_STRATEGIES.values()}
     for s in range(naive.shape[0]):
-        row = {c: float(naive[s, i]) for i, c in enumerate(cols)}
+        # The floor applies to the seed's pooled ticks, not a per-prey average: D-071.
+        row = {c: float(v) for c, v in zip(cols, sweep.pooled(naive[s]), strict=True)}
         desc = D.descriptors(row, denominator_floor=DENOM_FLOOR)
         for name in out:
             out[name].append(desc[name].value)

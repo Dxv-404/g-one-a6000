@@ -384,3 +384,50 @@ def test_the_guard_reads_the_stored_code_name(tmp_path, stubbed):
     assert sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=B) is None
     with pytest.raises(SystemExit, match="CODE MISMATCH"):
         sweep.run_condition("treatment", "baseline", None, tmp_path, code_commit=A)
+
+
+# ----------------------------------------------------------------------------- D-071, the pooled floor
+
+
+def _descriptor_values(row):
+    from src.measure import descriptors as D
+
+    named = dict(zip(sweep.EXPECTED_SCHEMA, row, strict=True))
+    return D.descriptors(named, denominator_floor=1.0)
+
+
+def test_pooling_changes_no_descriptor_value():
+    """Every descriptor is a ratio, so scaling a row to its pooled totals must leave every DEFINED value as it
+    was. If one moved, some descriptor is not a ratio of two accumulators and pooling would change a result."""
+    rng = np.random.default_rng(0)
+    row = rng.uniform(1.5, 50.0, len(sweep.EXPECTED_SCHEMA))  # every count above the floor either way
+    mean_d, pooled_d = _descriptor_values(row), _descriptor_values(sweep.pooled(row))
+    compared = 0
+    for name, d in mean_d.items():
+        if d.defined:
+            assert pooled_d[name].defined, f"{name} is defined on the mean row and not on the pooled one"
+            assert np.isclose(pooled_d[name].value, d.value, rtol=1e-12, atol=0.0), name
+            compared += 1
+    assert compared >= 30, f"only {compared} descriptors were compared, so the fixture is not exercising them"
+
+
+def test_the_floor_reads_the_pooled_ticks():
+    """The A6000 null's distancing case, D-071: 0.3 perceived ticks per prey-episode is under a 1.0 floor on
+    the mean, and about 614 pooled ticks, which is well over it. Undefined before pooling, defined after."""
+    from src.measure import descriptors as D
+
+    row = np.full(len(sweep.EXPECTED_SCHEMA), 5.0)
+    cols = list(sweep.EXPECTED_SCHEMA)
+    for name, value in {
+        "dg_perc_ticks": 0.3,
+        "dg_perc_excess_sum": -0.05,
+        "dg_far_ticks": 220.0,
+        "dg_far_excess_sum": 2.0,
+    }.items():
+        row[cols.index(name)] = value
+    name = D.NAMED_STRATEGIES["distancing"]
+    assert sweep.POOLED_PREY_EPISODES == 2048
+    assert not _descriptor_values(row)[name].defined, "the fixture no longer shows the failure being fixed"
+    pooled_d = _descriptor_values(sweep.pooled(row))[name]
+    assert pooled_d.defined
+    assert np.isclose(pooled_d.value, -0.05 / 0.3 - 2.0 / 220.0, rtol=1e-9)

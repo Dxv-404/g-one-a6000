@@ -9,8 +9,8 @@ the characterisation sweep, plus the commands to do it.
 refuse to start if a shipped file has been edited. If something goes wrong, the run either recovers by
 itself or stops with a message saying what to do, and the table at the end lists every message.
 
-    source commit     588f814cdf614a84bcb3ad109c69f9e936bfd890
-    verified commit   a68b679ef0080c4f932427a400395ff19aad9997   the run code is byte-identical to this commit, which passed
+    source commit     d7ed68bd14355b0a9abfca500b444cfb65c7e87c
+    verified commit   889a825a67b9970f74656955c3addebe775ed74f   the run code is byte-identical to this commit, which passed
                                            the full differential test tier
 
 **New to this? Read `OPERATOR-GUIDE.md` first.** It walks through every command with why it is there, the output to
@@ -22,8 +22,8 @@ expect, and whether it is safe to stop part way. This README is the reference: t
 |---|---|---|
 | 1. Set up | install uv, clone, open in VS Code, start tmux | 10 minutes |
 | 2. Check the machine | `bash scripts/a6000/check.sh` | 45 to 75 minutes |
-| 3. Baselines | `bash scripts/a6000/run.sh baselines` | 1 to 2 hours |
-| 4. The sweep | `bash scripts/a6000/run.sh sweep` | about 2 to 3 days, estimated |
+| 3. Baselines | `bash scripts/a6000/run.sh baselines` | about 2.5 hours |
+| 4. The sweep | `bash scripts/a6000/run.sh sweep` | about 5.3 to 5.6 days, measured |
 | 5. Send back | the folders `runs/sweep` and `results` | about 80 GB |
 
 The sweep's time is an estimate until step 2 measures this machine. The run prints its own estimate from
@@ -110,7 +110,7 @@ and the full deselect lists are at the top of `scripts/a6000/check.sh`.
 
     bash scripts/a6000/run.sh baselines
 
-This evolves the two baseline conditions, ten seeds each: one with the predator and one without. Then it
+This evolves the two baseline conditions, twenty seeds each: one with the predator and one without. Then it
 runs gate S5, which must pass, and gate S6, which is recorded. **S6 is expected to report FAILED at ten
 seeds.** That is a known, deliberate result under the gate's conservative assumption, and the seed count is
 the project owner's decision, so the run does not stop for it. The paired power analysis runs last.
@@ -126,7 +126,7 @@ before step 4, unless you were told to run everything in one go:
 
     bash scripts/a6000/run.sh sweep
 
-109 conditions, 10 seeds each, 300 generations each. To run steps 3 and 4 back to back without stopping:
+109 conditions, 20 seeds each, 300 generations each. To run steps 3 and 4 back to back without stopping:
 
     bash scripts/a6000/run.sh all
 
@@ -153,7 +153,7 @@ The terminal shows four kinds of line. The numbers here are only examples.
 - **Generation lines**, starting `gen`, appear every 25 generations of a seed. They show the time per
   generation, the mean and best fitness, the share of networks scoring zero, and the share of prey that were
   caught, starved or survived.
-- **Seed lines**, starting `seed`, appear when each of the ten seeds of a condition finishes. They show its
+- **Seed lines**, starting `seed`, appear when each of the twenty seeds of a condition finishes. They show its
   time, memory, and the GPU's temperature, clock, power and load.
 - **The live line**, starting `[cond 14/109 | seed 3/10 | gen 187/300]`, updates in place every half second with
   the time left for the seed and the sweep.
