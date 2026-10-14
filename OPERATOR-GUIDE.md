@@ -190,19 +190,7 @@ reopened.
 
 ### 2.2 Get the code
 
-**First, a GitHub token.** The repository is private, and git no longer accepts a GitHub password on the
-command line, so it needs a personal access token instead. Your GitHub account must already have been added
-to the repository; accept the invitation email first if there is one. Then, in a web browser:
-
-1. GitHub, your profile picture (top right), **Settings**.
-2. **Developer settings**, at the bottom of the left menu.
-3. **Personal access tokens**, then **Tokens (classic)**, then **Generate new token (classic)**. Use the
-   classic kind: the newer fine-grained tokens cannot reach a repository you were invited to on someone
-   else's personal account.
-4. Note: `a6000 run`. Expiration: 30 days. Tick the **repo** box. **Generate token**.
-5. Copy the token, which starts `ghp_`. GitHub shows it only once; keep it somewhere private for this step.
-
-**Then clone**, in the Ubuntu or Linux terminal:
+In the Ubuntu or Linux terminal:
 
 ```bash
 cd ~
@@ -215,27 +203,28 @@ cd g-one-a6000
 ```
 
 **Why.** The repository is the code exactly as verified. `cd ~` puts it in the Linux home folder, never on
-a Windows drive, which the check refuses.
+a Windows drive, which the check refuses. The repository is public, so no GitHub account or password is
+needed.
 
 **Expected.**
 
 ```
 Cloning into 'g-one-a6000'...
-Username for 'https://github.com': yourname
-Password for 'https://yourname@github.com':        paste the token here, then Enter
 remote: Enumerating objects: ...
 Receiving objects: 100% ...
+Resolving deltas: 100% ...
 ```
 
-- **Nothing appears while you paste the token.** That is normal; press Enter. In a VS Code terminal, paste is
-  `Ctrl+Shift+V` or a right click.
-- `Authentication failed` means a typo or a token without the **repo** box ticked: make a new one.
-- `Repository not found` means your account has not been given access yet, or the invitation was not
-  accepted.
-- Finally `pwd` should print `/home/yourname/g-one-a6000`. Anything starting `/mnt/` means you cloned onto a
-  Windows drive: `cd ~` and clone again.
+and the prompt returns. Then `pwd` should print `/home/yourname/g-one-a6000`. Anything starting `/mnt/` means
+you cloned onto a Windows drive: `cd ~` and clone again.
 
-Alternative, if the GitHub CLI is installed: `gh auth login` once, then `gh repo clone Dxv-404/g-one-a6000`.
+- `git: command not found`: install it with `sudo apt install -y git` (section 2.0 step d on Windows).
+- `Could not resolve host` or a timeout: the machine has no internet, or needs `HTTPS_PROXY` set (section 1).
+- **If git asks for a username and password**, the repository has been made private since this guide was
+  written. Ask the project team for access, then use a **personal access token** as the password: GitHub,
+  Settings, Developer settings, Personal access tokens, Tokens (classic), Generate new token (classic), tick
+  **repo**. The newer fine-grained tokens cannot reach a repository you were invited to on someone else's
+  personal account. Nothing appears while you paste the token; press Enter.
 
 **May I stop it?** Yes. Delete the half-made folder with `rm -rf ~/g-one-a6000` before trying again, since
 git refuses to clone into a folder that is not empty.
