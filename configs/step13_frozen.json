@@ -1,0 +1,167 @@
+{
+ "decision": "D-072",
+ "run": 46,
+ "frozen_on": "2026-11-04",
+ "derived_from": "null arm only, runs 43 and 44",
+ "statistic": "paired z per named descriptor over shared seeds: mean(diff) / (sd(diff) / sqrt(n))",
+ "quantile": 0.95,
+ "classifier_floor": 2.6983,
+ "separation_margin": 2.0965,
+ "denominator_floor": 1.0,
+ "min_pairs": 3,
+ "null_false_label_rate_at_both": 0.0283,
+ "pseudo_comparisons": 58000,
+ "stability_floor_two_halves": [
+  2.7006,
+  2.6946
+ ],
+ "script_commit": "86125f1c332a5b24800fb03184d1e287f7fda5b0",
+ "extract_index_sha256": "1121afecfc07668c19cce7dbd70239b3bb8419c2ce8f805c36f0fb48ad8cc5f5",
+ "per_condition": {
+  "null__baseline__None": {
+   "splits": 2000,
+   "q95_best": 2.5492502081065505,
+   "q95_margin": 2.047182614387204
+  },
+  "null__d_src_relax__(12-9-6-3-0)": {
+   "splits": 2000,
+   "q95_best": 2.748273946264159,
+   "q95_margin": 2.2605567665799198
+  },
+  "null__d_src_relax__(16-12-8-4-0)": {
+   "splits": 2000,
+   "q95_best": 2.8563241085485,
+   "q95_margin": 2.102790329946967
+  },
+  "null__d_src_relax__(2-1-1-0-0)": {
+   "splits": 2000,
+   "q95_best": 2.7659396869671564,
+   "q95_margin": 2.111096534761588
+  },
+  "null__d_src_relax__(4-3-2-1-0)": {
+   "splits": 2000,
+   "q95_best": 2.806590995991921,
+   "q95_margin": 2.233734714160871
+  },
+  "null__e_sprint__0.0": {
+   "splits": 2000,
+   "q95_best": 2.840176592506896,
+   "q95_margin": 2.039177082398051
+  },
+  "null__e_sprint__0.5": {
+   "splits": 2000,
+   "q95_best": 2.7677172896924938,
+   "q95_margin": 2.101714002039432
+  },
+  "null__e_sprint__2.0": {
+   "splits": 2000,
+   "q95_best": 2.4621368958014718,
+   "q95_margin": 1.8489036470753617
+  },
+  "null__e_sprint__4.0": {
+   "splits": 2000,
+   "q95_best": 2.723790858093917,
+   "q95_margin": 2.100081576514453
+  },
+  "null__k__10": {
+   "splits": 2000,
+   "q95_best": 2.7513884386357668,
+   "q95_margin": 2.1311413189485524
+  },
+  "null__k__12": {
+   "splits": 2000,
+   "q95_best": 2.6186988624762733,
+   "q95_margin": 2.083090543667035
+  },
+  "null__k__4": {
+   "splits": 2000,
+   "q95_best": 2.6523614070723123,
+   "q95_margin": 2.195623728016514
+  },
+  "null__k__6": {
+   "splits": 2000,
+   "q95_best": 2.6670616819547286,
+   "q95_margin": 2.0303351687203723
+  },
+  "null__n_food_src__12": {
+   "splits": 2000,
+   "q95_best": 2.6032041052556667,
+   "q95_margin": 1.9172628691918947
+  },
+  "null__n_food_src__4": {
+   "splits": 2000,
+   "q95_best": 2.7968224203536662,
+   "q95_margin": 2.1272835967143613
+  },
+  "null__n_food_src__5": {
+   "splits": 2000,
+   "q95_best": 2.661536037400279,
+   "q95_margin": 1.9705759027357055
+  },
+  "null__n_food_src__9": {
+   "splits": 2000,
+   "q95_best": 2.78899688887389,
+   "q95_margin": 2.157114167498637
+  },
+  "null__n_target_src__12": {
+   "splits": 2000,
+   "q95_best": 2.6596634640615733,
+   "q95_margin": 1.9629430332001554
+  },
+  "null__n_target_src__2": {
+   "splits": 2000,
+   "q95_best": 2.668382360544537,
+   "q95_margin": 2.0450357636584817
+  },
+  "null__n_target_src__4": {
+   "splits": 2000,
+   "q95_best": 2.782052421130427,
+   "q95_margin": 2.1127752617106426
+  },
+  "null__n_target_src__9": {
+   "splits": 2000,
+   "q95_best": 2.624015109078401,
+   "q95_margin": 2.0059309538376007
+  },
+  "null__obstacle_density__0.0": {
+   "splits": 2000,
+   "q95_best": 2.60434103528017,
+   "q95_margin": 2.0439740945956264
+  },
+  "null__obstacle_density__0.08": {
+   "splits": 2000,
+   "q95_best": 2.6968122050481242,
+   "q95_margin": 2.110371712031168
+  },
+  "null__obstacle_density__0.25": {
+   "splits": 2000,
+   "q95_best": 2.615530417614843,
+   "q95_margin": 2.2103268093260335
+  },
+  "null__obstacle_density__0.35": {
+   "splits": 2000,
+   "q95_best": 2.641216117133294,
+   "q95_margin": 2.074748828607868
+  },
+  "null__s_burst_prey__10.0": {
+   "splits": 2000,
+   "q95_best": 2.7736443892198004,
+   "q95_margin": 2.123755086620885
+  },
+  "null__s_burst_prey__15.0": {
+   "splits": 2000,
+   "q95_best": 2.6176727142686538,
+   "q95_margin": 2.1274680167359814
+  },
+  "null__s_burst_prey__40.0": {
+   "splits": 2000,
+   "q95_best": 2.6050588744845657,
+   "q95_margin": 2.097152329022946
+  },
+  "null__s_burst_prey__80.0": {
+   "splits": 2000,
+   "q95_best": 2.737995548199827,
+   "q95_margin": 2.153491529910974
+  }
+ }
+}

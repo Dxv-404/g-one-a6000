@@ -507,6 +507,7 @@ machine check, the baselines, and every checkpoint record which version of the c
 1. `bash scripts/a6000/check.sh`. The old check certified the old code only.
 2. `rm -rf runs/sweep results/BASELINES_DONE`, to remove the old baselines. Results from two versions of the
    experiment must never be combined, and the sweep refuses to try.
+   **Not for the replay update in section 8.** There `runs/sweep` must be kept: it is what the replay reads.
 3. `bash scripts/a6000/run.sh baselines`, and continue from section 4.
 
 **Expected.** `git pull` prints a list of changed files and ends at the prompt. If it says
@@ -535,3 +536,53 @@ was damaged in copying: copy it again from the machine.
 
 **Summary.** Clone, start tmux, and run three commands, each of which prints what to do next. Every stop is
 recoverable by running the same command again, except an exit 2, which means send the logs and wait.
+
+---
+
+## 8. The replay, after the sweep
+
+You will be told when to do this. The replay reads the sweep's finished checkpoints in `runs/sweep` and writes
+small result files to `runs/replay`. **It never changes anything in `runs/sweep`.**
+
+**Most important: keep `runs/sweep`.** The section "If the project team updates the code" tells you to delete
+`runs/sweep` after a pull. **Do not do that for this update.** Those files hold the only copy of the evolved
+populations, about 156 GB, and the replay needs every one of them.
+
+You do not need to run `check.sh` again for the replay. Before it measures anything, every job reproduces the
+sweep's own stored numbers exactly, and it stops by itself if it cannot. That is a stronger check of this
+machine and this code than `check.sh` would be.
+
+```bash
+cd ~/g-one-a6000
+```
+```bash
+git pull
+```
+
+**Why.** It brings the replay script. **Expected.** A list of changed files, ending at the prompt.
+
+```bash
+bash scripts/a6000/replay.sh --plan-only
+```
+
+**Why.** It lists what will run, without running it. **Expected.** The first line reads
+`plan: 148 jobs {'own': 103, 'real': 23, 'nullp': 22}`, followed by one line per job. It ends by itself.
+
+Then, inside tmux (section 2.4):
+
+```bash
+bash scripts/a6000/replay.sh
+```
+
+**Why.** It runs all 148 jobs. **Expected.** For each job, a line like `[12/148] own__treatment__k__4: 20 seeds`,
+then one line per seed. For jobs whose name starts with `own__`, every seed line must end in
+`reproduction exact`. It takes **about 5 to 8 hours**; that is an estimate from a laptop rehearsal, and the
+`about N h left` figure it prints is the better guide once a few jobs have finished.
+
+**May I stop it?** Yes, at any time, with Ctrl-C. Finished jobs are kept; run the same command to continue.
+
+**If it says `STOPPED on purpose (exit 3)`.** The line above it says why, for example that a stored number
+could not be reproduced. Do not simply run it again. Send `runs/replay/run.log` and `runs/replay/replay.log`.
+
+**When it finishes** it prints `DONE. Copy back the single file results/replay.tar`. Send that one file, roughly
+100 MB (an estimate). Nothing else is needed, and `runs/sweep` stays where it is.

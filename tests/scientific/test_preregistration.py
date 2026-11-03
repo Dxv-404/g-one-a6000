@@ -38,6 +38,7 @@ PREREGISTERED = (
     "src/measure/descriptors.py",
     "src/measure/discovery.py",
     "src/measure/classifier.py",
+    "configs/step13_frozen.json",
 )
 
 #: A run is Phase B if its notes say so. Recorded as a convention in `runs.md`'s field rules rather than
