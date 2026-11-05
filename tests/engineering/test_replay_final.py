@@ -155,6 +155,21 @@ def test_the_independent_check_against_the_sweeps_accumulator_can_fail():
     assert rf.sweep_mismatch(counts, rows, cols, k) == 1
 
 
+def test_a_trajectory_that_ends_differently_from_the_counted_episode_is_marked():
+    G, T_, k = 6, 5, 3
+    prey = np.zeros((G, 6, k), np.int32)
+    prey[:, 4, :] = 1  # every prey alive at the end of the counted episode
+    prey[4, 4, 2] = 0  # except genome 4's third prey
+    idx = np.array([1, 4, 5])
+    alive = np.ones((idx.size, T_, k), bool)
+    alive[1, -1, 2] = False
+    assert not rf.traj_mismatch(alive, prey, idx).any()
+    alive[2, -1, 0] = False  # genome 5's trajectory loses a prey the counted episode kept
+    assert rf.traj_mismatch(alive, prey, idx).tolist() == [False, False, True]
+    alive[1, -1, 2] = True  # and genome 4's keeps one the counted episode lost
+    assert rf.traj_mismatch(alive, prey, idx).tolist() == [False, True, True]
+
+
 def test_engagements_in_different_genomes_and_prey_are_kept_apart():
     running, prey = _case()
     two_r, two_p = np.concatenate([running, running[:, :, ::-1]]), np.concatenate([prey, prey[:, :, ::-1]])
@@ -210,6 +225,7 @@ def test_the_replay_reproduces_the_sweep_bit_for_bit_and_measures_the_rest(tiny_
             assert eng.shape == (1, 256, 2, len(rf.ENGAGEMENT_FIELDS)), name
             assert prey.shape[:3] == (1, 256, 2), name
             assert d["traj_prey_pos"].shape[:3] == (1, 4, d["traj_prey_pos"].shape[2])
+            assert d["traj_diverged"].shape == (1, 4) and not d["traj_diverged"].any(), name
             repro = json.loads(str(d["reproduction"]))
             cross = json.loads(str(d["cross_check"]))
             if name.startswith("own__"):
