@@ -22,12 +22,15 @@ One implementation, triggered by any entry point that touches the project.
 the assignment happened first. Call it from anything that produces a number: the gates call it through
 conftest, and every measurement entry point from step 11 onward must call it too.
 
-**The dangerous ordering is narrower than "import jax first", and the difference is worth being exact about.**
-JAX reads these flags when the backend initialises, which happens at the first *operation*, not at import. So
-`import jax` before `import src` is harmless as long as nothing has run. What defeats the setting is a JAX
-operation preceding the package import. That is a smaller and more checkable surface than import order in
-general, and it is the case the runtime assertion exists for. Established by measurement rather than by
-reading; see D-022.
+**The dangerous ordering depends on WHEN JAX reads each setting, and there are two answers.** The allocator
+flags above are read when the backend initialises, at the first *operation*, so for them `import jax` before
+`import src` is harmless as long as nothing has run (D-022, measured). **The compilation cache settings below
+are read once, at `import jax`.** So for the cache, import order alone decides, and the paragraph that stood
+here said the opposite for two months: every measurement driver imported `jax` first, the sweep, the replay and
+the calibration all compiled from scratch in every process, and only the tests, whose conftest imports `src`
+first, ever used the cache (DEV-039). The cure is not an import-order rule, which 29 drivers had already broken:
+`_apply_cache_config` hands the settings to an already-imported JAX directly, so the order stops mattering, and
+`assert_runtime_took_effect` refuses a process in which the cache is not configured.
 
 This module must not import jax. Importing it here would not by itself break anything, since import alone does
 not initialise the backend, but it would make package import slow and would put an operation one careless line
@@ -35,6 +38,7 @@ away from running before the flags are set.
 """
 
 import os
+import sys
 
 # Hard-set rather than defaulted. Deferring to a shell value would mean a clone and this machine disagree
 # about what "default" means, which is the failure being guarded against rather than a courtesy.
@@ -133,6 +137,30 @@ if os.environ.get("JAX_COMPILATION_CACHE_DIR") is None:
     # cap is silently ignored, which is why the size is checked in task 6's environment capture rather than
     # assumed to be holding.
     os.environ.setdefault("JAX_COMPILATION_CACHE_MAX_SIZE", str(2 * 1024**3))
+
+#: (environment variable, JAX config option, type). JAX reads these variables ONCE, at `import jax`.
+CACHE_CONFIG = (
+    ("JAX_COMPILATION_CACHE_DIR", "jax_compilation_cache_dir", str),
+    ("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "jax_persistent_cache_min_entry_size_bytes", int),
+    ("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "jax_persistent_cache_min_compile_time_secs", float),
+    ("JAX_COMPILATION_CACHE_MAX_SIZE", "jax_compilation_cache_max_size", int),
+)
+
+
+def _apply_cache_config() -> None:
+    """If JAX is already imported, give it the cache settings directly, since it read the environment before
+    this module set it (DEV-039). Never imports JAX itself: if JAX is not loaded yet, it will read the variables
+    above when it is, which is the ordinary path."""
+    jax = sys.modules.get("jax")
+    if jax is None:
+        return
+    for env, option, cast in CACHE_CONFIG:
+        value = os.environ.get(env)
+        if value is not None:
+            jax.config.update(option, cast(value))
+
+
+_apply_cache_config()
 
 _overridden = []
 for _name, _value in REQUIRED.items():
@@ -245,7 +273,39 @@ def assert_runtime_took_effect() -> dict:
     stats = jax.devices()[0].memory_stats() if observed["platform"] == "gpu" else None
     if stats:
         observed.update(check_memory_stats(stats))
+    observed.update(
+        check_cache_config({opt: getattr(jax.config, opt) for _e, opt, _c in CACHE_CONFIG}, os.environ)
+    )
     return observed
+
+
+def check_cache_config(config: dict, environ) -> dict:
+    """Raise unless JAX's live cache configuration equals what the environment asks for. Returns what it read.
+
+    **The third observable property, added after the first two missed this for two months (DEV-039).** The
+    allocator and dtype checks pass whatever the import order, because those settings are read at the first
+    operation; the cache settings are read at import, so a process that imported `jax` first ran with no cache
+    while every check here passed. Pure, so a test can hand it a mismatched configuration and see it refuse."""
+    seen = {}
+    for env, option, cast in CACHE_CONFIG:
+        want = environ.get(env)
+        have = config.get(option)
+        seen[option] = have
+        if want is None:
+            continue
+        if have is None or cast(have) != cast(want):
+            raise RuntimeError(
+                f"JAX's {option} is {have!r} but the environment asks for {want!r}. JAX read the environment "
+                "before `src` set it and `_apply_cache_config` did not correct it, so this process compiles "
+                "without the project's compilation cache: every program is compiled from scratch, and two "
+                "processes can compile one program differently (DEV-038, DEV-039)."
+            )
+    if not seen.get("jax_compilation_cache_dir"):
+        raise RuntimeError(
+            "JAX has no compilation cache directory. Every program would be compiled from scratch in this "
+            "process (DEV-039). `src` sets one unless JAX_COMPILATION_CACHE_DIR is given, so something removed it."
+        )
+    return {"cache_dir": seen["jax_compilation_cache_dir"]}
 
 
 def check_memory_stats(stats: dict) -> dict:

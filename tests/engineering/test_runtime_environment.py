@@ -89,3 +89,68 @@ def test_the_check_is_reachable_from_outside_pytest():
     assert callable(src.assert_runtime_took_effect)
     assert hasattr(src, "INHERITED_ENVIRONMENT")
     assert hasattr(src, "OVERRIDDEN")
+
+
+# ------------------------------------------------------------------------------------- the cache, DEV-039 ----
+_JAX_FIRST_PROBE = """
+import os, jax
+import src
+f = jax.jit(lambda x: x * 3.0 + 1.0)
+f(jax.numpy.ones(5)).block_until_ready()
+d = jax.config.jax_compilation_cache_dir
+print("DIR", d)
+print("FILES", sum(len(fs) for _, _, fs in os.walk(d)) if d else -1)
+"""
+
+
+def test_the_cache_works_when_jax_is_imported_before_src(tmp_path):
+    """DEV-039. Every measurement driver imported `jax` before `src`, JAX read the cache settings at import, and
+    the drivers compiled without a cache for two months while every check passed. Asserted on BEHAVIOUR: a
+    program compiled in a process that imports `jax` first must land in the cache `src` configures.
+
+    The cache home is a fresh directory so the count can only come from this process, and
+    JAX_COMPILATION_CACHE_DIR is removed so `src` sets it, which is the ordering the defect needed."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("JAX_")}
+    env["XDG_CACHE_HOME"] = str(tmp_path)
+    out = subprocess.run(
+        [sys.executable, "-c", _JAX_FIRST_PROBE], env=env, capture_output=True, text=True, check=True
+    )
+    lines = dict(line.split(" ", 1) for line in out.stdout.splitlines() if line.startswith(("DIR", "FILES")))
+    assert lines["DIR"].startswith(str(tmp_path)), (
+        lines
+    )  # the probe saw the cache src configured, not another
+    assert int(lines["FILES"]) > 0, f"nothing written to the cache with jax imported first: {lines}"
+
+
+def test_the_runtime_check_refuses_a_process_without_the_cache():
+    """The pure check, handed what a jax-first process had before the fix: no directory, default thresholds."""
+    import pytest
+
+    want = {
+        "JAX_COMPILATION_CACHE_DIR": "/home/x/.cache/jax-emergent-self-preservation",
+        "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
+    }
+    stale = {"jax_compilation_cache_dir": None, "jax_persistent_cache_min_compile_time_secs": 1.0}
+    with pytest.raises(RuntimeError, match="compilation cache"):
+        src.check_cache_config(stale, want)
+    wrong_threshold = {
+        "jax_compilation_cache_dir": want["JAX_COMPILATION_CACHE_DIR"],
+        "jax_persistent_cache_min_compile_time_secs": 1.0,
+    }
+    with pytest.raises(RuntimeError, match="min_compile_time"):
+        src.check_cache_config(wrong_threshold, want)
+    with pytest.raises(RuntimeError, match="no compilation cache directory"):
+        src.check_cache_config({"jax_compilation_cache_dir": None}, {})
+    good = {
+        "jax_compilation_cache_dir": want["JAX_COMPILATION_CACHE_DIR"],
+        "jax_persistent_cache_min_compile_time_secs": 0.0,
+    }
+    assert src.check_cache_config(good, want)["cache_dir"] == want["JAX_COMPILATION_CACHE_DIR"]
+
+
+def test_this_process_has_the_cache_configured():
+    assert src.assert_runtime_took_effect()["cache_dir"]
