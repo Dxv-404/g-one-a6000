@@ -213,8 +213,13 @@ def axis_levels(axis: str, world: dict | None = None) -> tuple:
 
 
 def conditions(arm: str) -> list[tuple[str, object]]:
-    """(axis, level) pairs for one arm, with `("baseline", None)` first. Derived, never transcribed."""
+    """(axis, level) pairs for one arm, with `("baseline", None)` first. Derived, never transcribed.
+
+    **Never a predator radius above the prey's (D-074, the refusal list).** Derived from the prey radius of the long
+    run's own world, not transcribed. D-084 states the long run omits these conditions; until 2026-11-09 this
+    function did not, so the plan held treatment r_pred 5 and 6 and third r_pred 6 (DEV-043)."""
     out: list[tuple[str, object]] = [("baseline", None)]
+    prey_r = arm_base("scripted").r
     for axis in LEVELS:
         levels = axis_levels(axis)
         if arm == "null" and axis in PREDATOR_ONLY:
@@ -224,6 +229,8 @@ def conditions(arm: str) -> list[tuple[str, object]]:
         picked = [lv for lv in levels if lv != getattr(arm_base("scripted"), axis)]
         if arm == "third":
             picked = [levels[0], levels[-1]]  # both ends only
+        if axis == "r_pred":
+            picked = [lv for lv in picked if lv <= prey_r]  # D-074: dropped, never replaced by another level
         out.extend((axis, lv) for lv in picked)
     return out
 

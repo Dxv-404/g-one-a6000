@@ -253,8 +253,8 @@ sweep() {
 longrun() {
   local free i rc failed=0 pids=()
   free=$(df -BG --output=avail "$OUT" | tail -1 | tr -dc '0-9')
-  # About 1.5 GB per condition (20 final populations of 256 genomes), 109 conditions: about 165 GB.
-  [ "$SMOKE" = 0 ] && [ "$free" -lt 200 ] && say "WARNING: ${free} GB free; the long run needs about 165 GB. It stops cleanly if space runs out."
+  # About 1.5 GB per condition (20 final populations of 256 genomes), 106 conditions: about 160 GB.
+  [ "$SMOKE" = 0 ] && [ "$free" -lt 200 ] && say "WARNING: ${free} GB free; the long run needs about 160 GB. It stops cleanly if space runs out."
   say "the long run as $SHARDS supervised process(es) on $GPUS GPU(s), into $OUT/shardIof$SHARDS"
   # Each shard is its own supervised loop in a subshell. Ctrl-C reaches this shell, which passes TERM to every
   # shard; each shard's own trap passes it to its sweep process, which stops between checkpoints.

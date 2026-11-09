@@ -54,11 +54,20 @@ def parse_nvidia_smi(text: str) -> dict | None:
     return None
 
 
-def gpu_reading() -> dict | None:
+def parse_nvidia_smi_all(text: str) -> list[dict | None]:
+    """One entry PER LINE, in card order, None where a line is unparseable, so a position is always a card index.
+    `parse_nvidia_smi` reads only the first parseable line, which on a machine with several cards is card 0 alone."""
+    out: list[dict | None] = []
+    for line in text.strip().splitlines():
+        out.append(parse_nvidia_smi(line) if line.strip() else None)
+    return out
+
+
+def _smi() -> str | None:
     if shutil.which("nvidia-smi") is None:
         return None
     try:
-        out = subprocess.run(
+        return subprocess.run(
             ["nvidia-smi", f"--query-gpu={_QUERY}", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
@@ -67,7 +76,16 @@ def gpu_reading() -> dict | None:
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return parse_nvidia_smi(out)
+
+
+def gpu_reading() -> dict | None:
+    out = _smi()
+    return None if out is None else parse_nvidia_smi(out)
+
+
+def gpu_readings_all() -> list[dict | None]:
+    out = _smi()
+    return [] if out is None else parse_nvidia_smi_all(out)
 
 
 def summarise_samples(samples: list[dict]) -> dict:
@@ -137,14 +155,22 @@ def round_clean(before: dict, after: dict, reference: dict) -> tuple[bool, str]:
 class Sampler:
     """GPU and host readings every `every` seconds on a thread, while a round runs."""
 
-    def __init__(self, every: float = 1.0):
+    def __init__(self, every: float = 1.0, all_cards: bool = False):
         self.every, self.gpu, self.load, self.mem_avail = every, [], [], []
+        #: With `all_cards`, readings of EVERY card are kept by index, for a round spread over several cards.
+        self.all_cards, self.cards = all_cards, {}
         self._stop = threading.Event()
         self._t = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
         while not self._stop.is_set():
-            r = gpu_reading()
+            if self.all_cards:
+                for i, r in enumerate(gpu_readings_all()):
+                    if r is not None:
+                        self.cards.setdefault(i, []).append(r)
+                r = self.cards.get(0, [None])[-1] if self.cards.get(0) else None
+            else:
+                r = gpu_reading()
             if r is not None:
                 self.gpu.append(r)
             h = host_snapshot()
@@ -164,6 +190,8 @@ class Sampler:
         out = summarise_samples(self.gpu)
         out["host_load1_max"] = max(self.load) if self.load else None
         out["host_mem_available_gib_min"] = min(self.mem_avail) if self.mem_avail else None
+        if self.all_cards:
+            out["per_card"] = {str(i): summarise_samples(v) for i, v in sorted(self.cards.items())}
         return out
 
 

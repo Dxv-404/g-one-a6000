@@ -74,10 +74,25 @@ def test_without_a_frozen_world_every_arm_is_its_run_configuration(monkeypatch):
 
 def test_the_plan_keeps_its_shape_and_its_baseline_under_the_frozen_world(frozen):
     counts = {a: len(sweep.conditions(a)) for a in ("treatment", "null", "third")}
-    assert counts == {"treatment": 53, "null": 29, "third": 27}
+    assert counts == {
+        "treatment": 51,
+        "null": 29,
+        "third": 26,
+    }  # D-074: r_pred 5, 6 and the third's 6 omitted
     wander = [lv for ax, lv in sweep.conditions("treatment") if ax == "p_wander"]
     assert WORLD["p_wander"] not in wander, "the frozen value is the baseline, not a level"
     assert 0.0 in wander, "the old default becomes a level"
+
+
+def test_the_plan_never_lets_the_predator_out_see_the_prey():
+    """D-074 and the refusal list, in the shipped frozen world. Asserted on the PARAMETERS each condition runs with,
+    so a level list, a baseline or a frozen world that moved a radius is caught alike (DEV-043)."""
+    for arm in sweep.ARMS:
+        for ax, lv in sweep.conditions(arm):
+            p = sweep.params_for(arm, ax, lv)
+            assert p.r_pred <= p.r, (arm, ax, lv, p.r_pred, p.r)
+    assert [lv for ax, lv in sweep.conditions("treatment") if ax == "r_pred"] == [2, 3]
+    assert [lv for ax, lv in sweep.conditions("third") if ax == "r_pred"] == [2], "dropped, never replaced"
 
 
 def test_a_long_run_refuses_an_unfrozen_or_out_of_grid_world(monkeypatch):
@@ -332,7 +347,7 @@ def test_a_frozen_value_between_levels_replaces_the_nearest_interior_level(monke
     )
     monkeypatch.setattr(frozen_world, "WORLD", {"cue_dependence": 0.85, "p_wander": 0.5})
     counts = {a: len(sweep.conditions(a)) for a in ("treatment", "null", "third")}
-    assert counts == {"treatment": 53, "null": 29, "third": 27}, "the map keeps its shape"
+    assert counts == {"treatment": 51, "null": 29, "third": 26}, "the map keeps its shape"
     cue = [x for ax, x in sweep.conditions("treatment") if ax == "cue_dependence"]
     assert 0.85 not in cue and {0.0, 1.0} <= set(cue), "the frozen value is the baseline; both ends stay"
     sweep.require_frozen_world(smoke=False)  # an interior value is accepted

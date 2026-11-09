@@ -75,7 +75,10 @@ if [ "$STAGE" = all ] || [ "$STAGE" = determinism ]; then
   step determinism "$PY" -u scripts/measure/session_determinism.py "$OUT/determinism"
 fi
 if [ "$STAGE" = all ] || [ "$STAGE" = concurrency ]; then
-  step concurrency "$PY" -u scripts/measure/session1_concurrency.py "$OUT/concurrency"
+  NGPU=$(nvidia-smi -L 2>/dev/null | grep -c "^GPU ")
+  [ "$NGPU" -ge 1 ] 2>/dev/null || NGPU=1
+  say "concurrency on $NGPU GPU(s): the curve on card 0, then every card at once if there is more than one"
+  step concurrency "$PY" -u scripts/measure/session1_concurrency.py "$OUT/concurrency" --gpus "$NGPU"
 fi
 if [ "$STAGE" = all ] || [ "$STAGE" = recheck ]; then
   step recheck "$PY" -u scripts/measure/calibrate_s4.py runs/s4-recheck --frozen

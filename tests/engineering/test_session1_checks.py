@@ -297,9 +297,90 @@ def test_with_no_eligible_round_the_recommendation_says_so_plainly():
     assert r["n"] is None and "no clean comparison was possible" in r["text"]
 
 
-def test_the_plan_size_is_the_ruled_one():
-    assert conc.PLAN_CONDITIONS * conc.PLAN_SEEDS * conc.PLAN_GENERATIONS == 106 * 20 * 1500
-    assert conc.SEED_BASE >= 200 and conc.SEQUENCE[0] == 2 and conc.N_CAP == 16
+def test_the_plan_shape_is_read_from_the_sweep_and_the_cap_reaches_32():
+    """D-093: the projection's plan comes from sweep.py, so it cannot drift as the 106 here once did (109 built)."""
+    sweep = _load("sweep_s1t", "sweep.py")
+    shape = conc.plan_shape(sweep)
+    assert shape["conditions"] == sum(len(sweep.conditions(a)) for a in sweep.ARMS) == 106
+    assert shape["predator_conditions"] == 51 + 26 and shape["null_conditions"] == 29
+    assert (shape["seeds"], shape["generations"], shape["s4_points"], shape["s4_episodes"]) == (
+        20,
+        1500,
+        7,
+        64,
+    )
+    assert conc.SEED_BASE >= 200 and conc.SEQUENCE[0] == 2 and conc.N_CAP == 32 and conc.SEQUENCE[-1] == 32
+    assert list(conc.SEQUENCE) == sorted(set(conc.SEQUENCE))
+    assert {c for c, _, _ in conc.HEAVY} == {"treatment"}
+    for arm, axis, level in conc.HEAVY:
+        assert (axis, level) in sweep.conditions(arm), "a heavy condition must be one the long run runs"
+
+
+def test_the_projection_counts_s4_only_where_there_is_a_predator_and_bounds_by_the_heaviest():
+    shape = {
+        "conditions": 10,
+        "predator_conditions": 6,
+        "null_conditions": 4,
+        "seeds": 2,
+        "generations": 100,
+        "s4_points": 3,
+        "s4_episodes": 64,
+    }
+    p = conc.project(2.0, shape, s4_gen_equiv=5.0, heavy_ratio=1.5, null_generations=30)
+    assert p["evo_generations"] == 2000 and p["s4_generation_equivalents"] == 6 * 2 * 3 * 5.0
+    assert p["total_generation_equivalents"] == 2180 and p["days"] == pytest.approx(2180 / 2.0 / 86400)
+    assert p["days_if_every_condition_cost_the_heaviest"] == pytest.approx(p["days"] * 1.5)
+    assert p["null_job_generations"] == 4 * 2 * 30 and p["null_job_days"] == pytest.approx(240 / 2.0 / 86400)
+    assert conc.project(2.0, shape, 5.0, heavy_ratio=0.8)["heavy_ratio"] == 1.0, "never below the baseline"
+
+
+def test_the_s4_cost_reads_only_workers_with_a_predator_and_a_finite_measurement():
+    w = {
+        "a": {"has_predator": True, "s4_seconds": 10.0, "loop_rate": 2.0},
+        "b": {"has_predator": True, "s4_seconds": 20.0, "loop_rate": 2.0},
+        "c": {"has_predator": False, "s4_seconds": 0.0, "loop_rate": 2.0},
+        "d": {"has_predator": True, "s4_seconds": float("nan"), "loop_rate": 2.0},
+    }
+    assert conc.s4_generation_equivalent(w) == 30.0  # the median of 20 and 40 generations
+
+
+def test_the_last_generation_is_split_into_evolution_and_s4():
+    assert conc.split_last_generation(100.0, 2.0, 110.0) == (102.0, 8.0)
+    assert conc.split_last_generation(100.0, 2.0, 101.5) == (102.0, 0.0)
+
+
+def test_in_the_every_card_round_every_seed_runs_on_every_card():
+    """Shapes where the counts share a factor are included: at 3 per card on 2 cards, a seed-per-position mapping
+    also puts every seed on every card, so that shape alone cannot tell the two apart (falsification found it)."""
+    for n, k in ((3, 2), (2, 2), (4, 2), (3, 3), (1, 4)):
+        plan = conc.card_plan(n, k)
+        assert len(plan) == n * k
+        seeds = [conc.SEED_BASE + j for j in range(n)]
+        for card in range(k):
+            assert sorted(s for s, c in plan if c == card) == seeds, (n, k, card)
+        assert all({c for s, c in plan if s == seed} == set(range(k)) for seed in seeds), (n, k)
+
+
+def test_the_every_card_round_reads_the_memory_of_every_card():
+    r = {
+        "failed": False,
+        "gpu": {"per_card": {"0": {"mem_used_mib_max": 1000.0}, "1": {"mem_used_mib_max": TOTAL - 7 * 1024}}},
+    }
+    ok, why = conc.cards_eligible(r, True, TOTAL, 8.0)
+    assert not ok and "card 1" in why
+    r["gpu"]["per_card"]["1"]["mem_used_mib_max"] = 1000.0
+    assert conc.cards_eligible(r, True, TOTAL, 8.0)[0]
+    assert not conc.cards_eligible(r, False, TOTAL, 8.0)[0]
+    assert not conc.cards_eligible({"failed": False, "gpu": {}}, True, TOTAL, 8.0)[0]
+
+
+def test_nvidia_smi_is_read_per_card_with_positions_kept():
+    t = "10, 100, 81559, 40\n[N/A], 1, 2, 3\n30, 300, 81559, 50\n"
+    r = s1.parse_nvidia_smi_all(t)
+    assert len(r) == 3 and r[1] is None and r[2]["util"] == 30.0
+    assert s1.parse_nvidia_smi(t)["util"] == 10.0, (
+        "the one-card reading is unchanged: the first parseable line"
+    )
     assert conc.GPU_HEADROOM_GIB == 8.0 and conc.GAIN_FLOOR == 0.05
 
 
@@ -331,7 +412,7 @@ def test_the_concurrency_driver_runs_end_to_end_at_smoke_size(tmp_path):
     reproduce their solo references, which is what the bit-identity verdict reads on the A6000."""
     out = tmp_path / "smoke-concurrency"
     r = subprocess.run(
-        [sys.executable, str(MEASURE / "session1_concurrency.py"), str(out), "--smoke"],
+        [sys.executable, str(MEASURE / "session1_concurrency.py"), str(out), "--smoke", "--gpus", "2"],
         capture_output=True,
         text=True,
         cwd=ROOT,
@@ -345,3 +426,13 @@ def test_the_concurrency_driver_runs_end_to_end_at_smoke_size(tmp_path):
     rounds = json.loads((out / "rounds.json").read_text())["rounds"]
     assert set(rounds[0]["identity"]) == {"200", "201"}
     assert rounds[0]["background_before"]["available"] and rounds[0]["background_after"]["available"]
+    # D-093: the in-run S4 is measured in every worker with a predator, outside the throughput window
+    for w in rounds[0]["workers"].values():
+        assert w["has_predator"] and w["s4_seconds"] > 0 and w["evo_end_time"] <= w["loop_end_time"]
+    assert s["plan_shape"]["conditions"] == 106
+    assert set(s["heavy"]) == {"treatment__n_pred__6", "treatment__k__12"}
+    assert all(h["cost_ratio"] and h["cost_ratio"] > 0 for h in s["heavy"].values())
+    m = s["every_card"]
+    assert m["simulated"] and m["cards"] == 2 and m["workers"] == 2 * m["per_card"] and m["identical"] is True
+    p = s["projection"]
+    assert p is not None and p["s4_generation_equivalents"] > 0 and "--gpus=2" in p["command"]
