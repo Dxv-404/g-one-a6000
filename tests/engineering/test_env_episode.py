@@ -400,6 +400,7 @@ def test_accidental_stillness_is_present_in_the_carry(static, weights):
     assert acc.accidental_still.shape == (P.k,)
 
 
+@pytest.mark.slow  # 43.3s call measured warm, whole file, 2026-11-08: 60 eager ticks
 def test_score_only_ever_increases(static, weights):
     """`prey_score` is the sole fitness input. Invariant I1 depends on it being a clean count.
 
@@ -420,6 +421,7 @@ def test_score_only_ever_increases(static, weights):
         previous = state.prey_score
 
 
+@pytest.mark.slow  # 39.5s call measured warm, whole file, 2026-11-08: 60 eager ticks
 def test_the_episode_actually_exercises_predation(static, weights):
     """**The coverage assertion whose absence let four falsification breaks survive.**
 
@@ -462,6 +464,7 @@ def test_the_recorded_grids_carry_real_content_not_just_the_right_shape(static, 
     assert bool(jnp.all(traj.target_grid[-1] == state.target_grid))
 
 
+@pytest.mark.slow  # 52.5s call measured warm, whole file, 2026-11-08: 60 eager ticks
 def test_the_other_four_strategy_classes_are_actually_accumulated(static, weights):
     """**The coverage assertion for DEV-019, and the reason it is written as a constructed scenario.**
 
@@ -487,7 +490,10 @@ def test_the_other_four_strategy_classes_are_actually_accumulated(static, weight
         "far_ticks",
         "occluded_far",
         "visible_unengaged_ticks",
-        "dist_sum_visible",
+        # `dist_sum_visible` is NOT here; it has its own scenario below, because this one cannot guarantee
+        # it. A still prey ends every tick on the predator's own cell, so a prey that freezes after first
+        # contact contributes distance 0 on every visible tick. The network fixture did exactly that once
+        # D-085 added the weapon row and redrew the weights: 60 visible ticks, all at distance 0.
         "nn_visible_ticks",
         "nn_sum_visible",
         "nn_unseen_ticks",
@@ -536,6 +542,62 @@ def test_the_other_four_strategy_classes_are_actually_accumulated(static, weight
     )
 
 
+@pytest.mark.slow  # 39.1s call measured warm, whole file, 2026-11-08: 60 eager ticks
+def test_distance_is_accumulated_on_visible_ticks_spent_apart(static, weights):
+    """`dist_sum_visible` checked against a witness computed from positions, under a policy that flees.
+
+    **Split out of the coverage test above because the two scenarios want opposite prey.** Engagement needs
+    the predator to close; this sum needs visible ticks at a NONZERO distance. A prey that freezes ends on
+    the predator's cell and adds zero every tick, and an untrained network either freezes or flees depending
+    on its draw, so one fixture satisfied both only by luck: random weights failed on 2 of keys 1 to 5.
+
+    The policy emits W for every prey. The constructed predator starts `r_near` to the EAST of prey 0, so
+    W is away from it, and inside `r_near` detection is deterministic, so visible ticks at distance 1 or more
+    are guaranteed for the first ticks of the episode rather than likely.
+
+    **The value is asserted, not only its sign.** The witness sums the Chebyshev distance from the post-tick
+    positions over exactly the ticks on which `visible_ticks` incremented, so a `d_prev` read, a dropped
+    mask or a wrong distance metric fails here, while the old `> 0` would pass all three.
+    """
+
+    def flee_west(w, obs, hidden, step_index):
+        del w
+        west = dynamics.ACTION_MOVE_FIRST + 6  # grid.DIRECTIONS[6] is (0, -1)
+        return jnp.full((obs.shape[0],), west, jnp.int32), hidden
+
+    state = _engaged_state(static)
+    assert int(state.pred_pos[0, 1]) > int(state.prey_pos[0, 1]), (
+        "the predator must start east of prey 0 for W to be the flee direction; if `_engaged_state` moved "
+        "the predator, this policy no longer flees and the scenario no longer guarantees distance"
+    )
+    acc = E.zero_accumulators(P.k)
+    ent = _entropy()
+    witness = jnp.zeros(P.k, jnp.float32)
+    visible_apart = 0
+    for i in range(P.t_horizon):
+        before = acc.visible_ticks
+        state, acc, _ = E.tick(state, acc, weights, static, ent, jnp.int32(i), P, flee_west)
+        seen = acc.visible_ticks > before
+        d = jnp.min(
+            jnp.max(jnp.abs(state.pred_pos[:, None, :] - state.prey_pos[None, :, :]), axis=-1), axis=0
+        )
+        witness = witness + jnp.where(seen, d, 0).astype(jnp.float32)
+        visible_apart += int(jnp.sum(seen & (d > 0)))
+
+    # The precondition, asserted before the verdict: without a visible tick spent apart, the sum is zero
+    # whether or not the accumulation is wired, and the equality below would hold vacuously.
+    assert visible_apart > 0, (
+        "no prey was ever visible at a nonzero distance, so the scenario cannot distinguish a working "
+        "dist_sum_visible from one that adds zero"
+    )
+    assert bool(jnp.all(acc.dist_sum_visible == witness)), (
+        f"dist_sum_visible {acc.dist_sum_visible.tolist()} disagrees with the position witness "
+        f"{witness.tolist()}: it must sum the post-tick Chebyshev distance to the nearest predator over the "
+        "ticks the prey is visible"
+    )
+
+
+@pytest.mark.slow  # 39.9s call measured warm, whole file, 2026-11-08: 60 eager ticks
 def test_the_accumulator_accounting_identities_hold(static, weights):
     """Two partitions that must add up, asserted as identities rather than as values.
 

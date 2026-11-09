@@ -31,6 +31,8 @@ The descriptor values use the same pooled denominator floor as S5 and run 45 (D-
 
 from __future__ import annotations
 
+import argparse
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -100,8 +102,38 @@ def null_seed_values(path: pathlib.Path) -> dict[str, np.ndarray]:
     }
 
 
-def main() -> None:
-    files = sorted(EXTRACT.glob("null__*.npz"))
+def source_fingerprint(source: pathlib.Path, files: list[pathlib.Path]) -> str:
+    """The handoff extract carries an index; a sweep folder does not, so hash the null files themselves."""
+    if (source / "index.json").exists():
+        return hashlib.sha256((source / "index.json").read_bytes()).hexdigest()
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f.name.encode())
+        h.update(hashlib.sha256(f.read_bytes()).digest())
+    return h.hexdigest()
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--source", type=pathlib.Path, default=EXTRACT, help="a folder of the 29 null conditions")
+    ap.add_argument(
+        "--out",
+        type=pathlib.Path,
+        default=OUT,
+        help="where the frozen thresholds go. Written ONCE: an existing file is refused, never overwritten. The long "
+        "run's re-derivation in the frozen world (Q-058) writes configs/step13_frozen_longrun.json, so run 46's "
+        "file, which runs 47 and 52 read, is never touched",
+    )
+    ap.add_argument("--run", default="46", help="the registered run id this derivation is")
+    ap.add_argument("--derived-from", default="null arm only, runs 43 and 44")
+    ap.add_argument("--decision", default="D-072")
+    a = ap.parse_args(argv)
+    if a.out.exists():
+        raise SystemExit(
+            f"{a.out} exists. Frozen thresholds are written once; deriving them again into the same file would "
+            "overwrite what earlier analyses read. Choose a new --out, and record why."
+        )
+    files = sorted(a.source.glob("null__*.npz"))
     assert len(files) == 29, f"expected 29 null conditions, found {len(files)}"
     rng = np.random.default_rng(SEED)
     named = list(D.NAMED_STRATEGIES.values())
@@ -137,10 +169,11 @@ def main() -> None:
         ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True
     ).stdout.strip()
     frozen = {
-        "decision": "D-072",
-        "run": 46,
-        "frozen_on": "2026-11-04",
-        "derived_from": "null arm only, runs 43 and 44",
+        "decision": a.decision,
+        "run": int(a.run) if a.run.isdigit() else a.run,
+        "frozen_on": datetime.date.today().isoformat(),
+        "derived_from": a.derived_from,
+        "source": str(a.source),
         "statistic": "paired z per named descriptor over shared seeds: mean(diff) / (sd(diff) / sqrt(n))",
         "quantile": QUANTILE,
         "classifier_floor": round(floor, 4),
@@ -151,10 +184,10 @@ def main() -> None:
         "pseudo_comparisons": int(best.size),
         "stability_floor_two_halves": [round(h, 4) for h in halves],
         "script_commit": commit,
-        "extract_index_sha256": hashlib.sha256((EXTRACT / "index.json").read_bytes()).hexdigest(),
+        "extract_index_sha256": source_fingerprint(a.source, files),
         "per_condition": per_cond,
     }
-    OUT.write_text(json.dumps(frozen, indent=1) + "\n")
+    a.out.write_text(json.dumps(frozen, indent=1) + "\n")
     print(f"floor {floor:.4f}  separation {separation:.4f}  over {best.size} null pseudo-comparisons")
     print(f"null label rate with both applied {fp:.4f}; floor from two halves {halves}")
     q = sorted(per_cond.items(), key=lambda kv: kv[1]["q95_best"])
@@ -166,7 +199,7 @@ def main() -> None:
         q[-1][0],
         round(q[-1][1]["q95_best"], 3),
     )
-    print(f"written {OUT}")
+    print(f"written {a.out}")
 
 
 if __name__ == "__main__":

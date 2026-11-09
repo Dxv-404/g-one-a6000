@@ -21,8 +21,8 @@ import pytest
 
 from configs.default import DEFAULT
 from src.agent import network as net
+from src.env import dynamics, resources
 from src.env import env as E
-from src.env import resources
 from src.env.entropy import PRNGSource, make_replay_source
 from src.env.perception import build_vis_table
 from src.reference import naive_env as oracle
@@ -149,6 +149,16 @@ def build_scenario(n_pred: int):
         k: v + 0.3 * jax.random.normal(pert[i], v.shape, v.dtype)
         for i, (k, v) in enumerate(sorted(weights.items()))
     }
+    # **Bias toward a RESERVED action, so the mask path runs in the comparison and not only by luck.**
+    # D-031's emitted versus executed split is witnessed only on ticks where they differ, and the perturbed
+    # network above emitted no masked action at all once D-085's weapon row redrew it: 0 differing ticks at
+    # every predator count, so the comparison agreed over a path that never ran. `attack` is masked
+    # UNCONDITIONALLY in increment 1, so coverage depends only on its emission, not on stamina running dry
+    # at the right moment. Measured, masked ticks at n_pred 0 / 1 / 2 by bias: +1.0 gives 3 / 0 / 1, +2.0
+    # gives 75 / 72 / 72 with prey still moving, +3.0 gives about 240 of 240 with movement gone. +2.0 sits
+    # clear of both cliffs. The coverage test asserts both paths, so a future redraw that tips it either way
+    # fails there by name rather than passing over nothing.
+    weights["b_out"] = weights["b_out"].at[dynamics.ACTION_ATTACK].add(2.0)
     return static, state, weights, PP
 
 

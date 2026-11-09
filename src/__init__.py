@@ -71,6 +71,7 @@ INHERITED_ENVIRONMENT = {
     )
 }
 
+
 # --------------------------------------------------------------------------- compilation cache
 #
 # XLA compilation, not execution, is almost all of this project's test runtime: 147 tests in 890 seconds is
@@ -90,6 +91,24 @@ INHERITED_ENVIRONMENT = {
 #
 # Kept outside the repository, in the conventional user cache location, so there is nothing to gitignore and
 # nothing to exclude from the wheel. It is named for the project so clones do not collide with other JAX work.
+def probe_writable(directory: str) -> str:
+    """Create and remove a probe file in `directory`; raises OSError if it cannot. Returns the probe's path.
+
+    **The probe's name is unique to this call** (`tempfile.mkstemp`), because it used to be a fixed `.writable`
+    and session 1 measured the consequence on the A6000: six processes starting at once, two of them created and
+    deleted the same file, the second delete found nothing, and that process died before it ran (DEV-040). Any
+    long run that starts several processes together would have met the same race."""
+    import tempfile
+
+    fd, path = tempfile.mkstemp(prefix=".writable.", dir=directory)
+    try:
+        os.write(fd, b"x")
+    finally:
+        os.close(fd)
+    os.unlink(path)
+    return path
+
+
 _CACHE_DIR = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
     "jax-emergent-self-preservation",
@@ -107,10 +126,7 @@ if os.environ.get("JAX_COMPILATION_CACHE_DIR") is None:
     # assertion: no error, no signal, and a timing figure that means something different from what it says.
     try:
         os.makedirs(_CACHE_DIR, exist_ok=True)
-        _probe = os.path.join(_CACHE_DIR, ".writable")
-        with open(_probe, "w") as _f:
-            _f.write("x")
-        os.unlink(_probe)
+        probe_writable(_CACHE_DIR)
     except OSError as _exc:
         raise RuntimeError(
             f"the compilation cache directory {_CACHE_DIR} is not writable: {_exc}. JAX would disable the "

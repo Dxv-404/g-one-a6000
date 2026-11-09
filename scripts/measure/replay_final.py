@@ -91,6 +91,7 @@ from src.env import env as E  # noqa: E402
 from src.env import grid, resources  # noqa: E402
 from src.env.perception import build_vis_table, required_radius  # noqa: E402
 from src.evo import genome, loop  # noqa: E402
+from src.measure import engagement  # noqa: E402
 
 _SPEC = importlib.util.spec_from_file_location("sweep_mod", ROOT / "scripts" / "measure" / "sweep.py")
 sweep = importlib.util.module_from_spec(_SPEC)
@@ -98,16 +99,10 @@ _SPEC.loader.exec_module(sweep)
 
 #: Bumped whenever the output layout changes, so resume never mixes layouts.
 SCHEMA_VERSION = 1
-ENGAGEMENT_FIELDS = (
-    "engagements",
-    "escaped",
-    "captured",
-    "died_other",
-    "censored",
-    "engaged_ticks",
-    "predated_outside_engagement",
-)
-PREY_FIELDS = ("alive_ticks", "death_step", "died_predated", "died_starving", "alive_at_end", "score")
+# Engagement counting lives in src.measure.engagement, the one implementation the calibration and the long run's
+# in-run S4 also use. Moved there unchanged on 2026-11-06; these names stay so existing callers and tests read them.
+ENGAGEMENT_FIELDS = engagement.ENGAGEMENT_FIELDS
+PREY_FIELDS = engagement.PREY_FIELDS
 TRAJ_FIELDS = ("prey_pos", "prey_alive", "prey_moved", "action_emitted", "action_executed", "pred_pos")
 DEFAULT_EPISODES = 4
 DEFAULT_TRAJ_GENOMES = 16
@@ -192,55 +187,7 @@ def build_static(p, seed: int, eval_p):
     )
 
 
-def make_engagement_pass(unflatten, params):
-    """One episode per genome through the SAME `reset` and `tick` the sweep uses, emitting per tick the running
-    `engaged_ticks` and the alive mask, so engagement runs are read from the environment's own definition.
-
-    **The world is an ARGUMENT, not a closed-over constant.** The sweep's own pass bakes each seed's layout into
-    its program, so it compiles once per seed; that is kept for the reproduction pass, which must be the
-    identical program to reproduce bit for bit. This pass is cross-checked instead, and taking the world as an
-    argument lets one compiled program serve all twenty seeds of a job."""
-
-    def one(vec, k, static):
-        k_reset, k_draws = jax.random.split(k)
-        weights = unflatten(vec)
-        entropy = ent.PRNGSource(k_draws)
-        state = E.reset(ent.PRNGSource(k_reset), static, params)
-        acc = E.zero_accumulators(params.k)
-
-        def body(carry, _):
-            st, ac, t = carry
-            st, ac, _rec = E.tick(st, ac, weights, static, entropy, t, params)
-            return (st, ac, t + 1), (ac.engaged_ticks, st.prey_alive)
-
-        (st, ac, _), (eng_running, alive_after) = jax.lax.scan(
-            body, (state, acc, jnp.int32(0)), None, length=params.t_horizon
-        )
-        row = jnp.concatenate(
-            [
-                jnp.stack([jnp.mean(getattr(ac, f).astype(jnp.float32)) for f in sweep.ACC_FIELDS]),
-                jnp.stack(
-                    [
-                        jnp.mean(st.prey_died_predated.astype(jnp.float32)),
-                        jnp.mean(st.prey_died_starving.astype(jnp.float32)),
-                        jnp.mean(st.prey_alive.astype(jnp.float32)),
-                    ]
-                ),
-            ]
-        )
-        prey = jnp.stack(
-            [
-                ac.alive_ticks.astype(jnp.int32),
-                st.prey_death_step,
-                st.prey_died_predated.astype(jnp.int32),
-                st.prey_died_starving.astype(jnp.int32),
-                st.prey_alive.astype(jnp.int32),
-                st.prey_score.astype(jnp.int32),
-            ]
-        )
-        return row, eng_running, prey, st.spawn_relax_level
-
-    return jax.jit(jax.vmap(one, in_axes=(0, 0, None)))
+make_engagement_pass = engagement.make_engagement_pass
 
 
 def make_trajectory_pass(unflatten, params):
@@ -257,48 +204,7 @@ def make_trajectory_pass(unflatten, params):
 
 
 # ------------------------------------------------------------------------------------ engagement runs ----
-def engagement_counts(eng_running: np.ndarray, prey: np.ndarray) -> np.ndarray:
-    """(G, T, k) running engaged_ticks and (G, 6, k) prey facts -> (G, len(ENGAGEMENT_FIELDS)) counts.
-
-    Asserts the two accounting identities. Pure numpy, so it is unit-tested on hand-built arrays."""
-    eng_running = np.asarray(eng_running, np.int64)
-    G, T, k = eng_running.shape
-    inc = np.diff(np.concatenate([np.zeros((G, 1, k), np.int64), eng_running], axis=1), axis=1)
-    assert np.isin(inc, (0, 1)).all(), "engaged_ticks moved by something other than 0 or 1 in a tick"
-    e = inc.astype(np.int8)
-    d = np.diff(
-        np.concatenate([np.zeros((G, 1, k), np.int8), e, np.zeros((G, 1, k), np.int8)], axis=1), axis=1
-    )
-    sg, st, sp = np.nonzero(d == 1)
-    eg, et, ep = np.nonzero(d == -1)
-    so = np.lexsort((st, sp, sg))
-    eo = np.lexsort((et, ep, eg))
-    sg, st, sp = sg[so], st[so], sp[so]
-    eg, et, ep = eg[eo], et[eo] - 1, ep[eo]
-    assert np.array_equal(sg, eg) and np.array_equal(sp, ep), "engagement starts and ends do not pair"
-
-    death = prey[:, 1, :]
-    predated = prey[:, 2, :].astype(bool)
-    alive_end = prey[:, 4, :].astype(bool)
-    ds = death[sg, sp]
-    died_in = (ds >= st) & (ds <= et) & (ds >= 0)
-    captured = died_in & predated[sg, sp]
-    died_other = died_in & ~predated[sg, sp]
-    censored = ~died_in & (et == T - 1) & alive_end[sg, sp]
-    escaped = ~died_in & ~censored
-
-    out = np.zeros((G, len(ENGAGEMENT_FIELDS)), np.int64)
-    for j, mask in enumerate((np.ones_like(captured), escaped, captured, died_other, censored)):
-        np.add.at(out[:, j], sg, mask.astype(np.int64))
-    np.add.at(out[:, 5], sg, (et - st + 1))
-    in_any = np.zeros((G, k), bool)
-    in_any[sg[captured], sp[captured]] = True
-    out[:, 6] = (predated & ~in_any).sum(axis=1)
-    # **No identity is asserted here, and that is deliberate.** The four outcomes partition the engagements and
-    # the run lengths sum to the counter's last value BY CONSTRUCTION: both are computed from the same counter,
-    # so an assertion of either can never fail, and a check that cannot fail manufactures confidence. The
-    # independent check is `sweep_mismatch`, against the sweep's own accumulator from a separate program.
-    return out
+engagement_counts = engagement.engagement_counts
 
 
 def sweep_mismatch(eng_ep0: np.ndarray, rows: np.ndarray, cols: list[str], k: int) -> int:
@@ -350,30 +256,33 @@ def run_job(
     job_unflatten = genome.unflattener(net.init_params(jax.random.key(0), p_arm))
     eng_pass = make_engagement_pass(job_unflatten, eval_p)
     traj_pass = make_trajectory_pass(job_unflatten, eval_p) if traj_genomes else None
-    for s in range(n_seeds):
+    # A seed's VALUE drives its layout, initial population and keys; its POSITION indexes the stored arrays.
+    # Phase A stored no `seeds` and used 0 to 19, where the two coincide; the long run starts at 20 (D-084).
+    seed_values = [int(x) for x in ckpt["seeds"]] if "seeds" in ckpt else list(range(int(ckpt["n_seeds"])))
+    for j, s in enumerate(seed_values[:n_seeds]):
         t0 = time.time()
         template = net.init_params(jax.random.key(s), p_arm)
         unflatten = genome.unflattener(template)
         static = build_static(p_arm, s, eval_p)
         ka, ke = seed_keys(s, n_gen)
         key = ka if job.key_kind == "ka" else ke
-        pop = jnp.asarray(pops[s])
+        pop = jnp.asarray(pops[j])
 
         acc_pass = sweep.make_accumulator_pass(unflatten, static, eval_p)
         rows = acc_pass.all(key, pop)
         rec = {"seed": s}
         if job.kind == "own":
             stored = (
-                np.asarray(ckpt["naive_acc"][s])
+                np.asarray(ckpt["naive_acc"][j])
                 if job.arm == "null"
-                else np.asarray(ckpt["sample_acc"][s, -1])
+                else np.asarray(ckpt["sample_acc"][j, -1])
             )
             mean = rows.mean(axis=0).astype(np.float32)
             rec["exact"] = bool(np.array_equal(mean, stored))
             rec["max_abs_diff"] = float(np.max(np.abs(mean.astype(np.float64) - stored)))
             if job.arm == "null":
                 rec["per_genome_exact"] = bool(
-                    np.array_equal(rows.astype(np.float32), np.asarray(ckpt["naive_acc_per_genome"][s]))
+                    np.array_equal(rows.astype(np.float32), np.asarray(ckpt["naive_acc_per_genome"][j]))
                 )
             if not rec["exact"] and not allow_drift:
                 raise SystemExit(
@@ -494,6 +403,12 @@ def output_ok(path: pathlib.Path) -> bool:
 
 
 def main(argv=None) -> int:
+    if sweep.frozen_world.WORLD is not None:
+        raise SystemExit(
+            "the replay re-evaluates Phase A's populations in Phase A's world, but configs/frozen_world.py now "
+            "holds the long run's world, which sweep.params_for applies to every arm. Run 48 is complete; a "
+            "replay after the freeze would evaluate the old populations in the new world without saying so."
+        )
     ap = argparse.ArgumentParser(prog="replay_final.py", description=__doc__.split("\n")[0])
     ap.add_argument("sweep_dir", type=pathlib.Path)
     ap.add_argument("out_dir", type=pathlib.Path)
@@ -559,6 +474,7 @@ def main(argv=None) -> int:
                         "code_commit",
                         "sample_acc",
                         "n_seeds",
+                        *(("seeds",) if "seeds" in d.files else ()),
                         *(("naive_acc", "naive_acc_per_genome") if "naive_acc" in d.files else ()),
                     )
                 }

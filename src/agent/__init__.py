@@ -5,7 +5,7 @@ an empty namespace costs nothing while an undocumented gap invites someone to pu
 
 What arrives, and why the shape is already fixed:
 
-    network   build step 6.  flatten(9,9,14) -> Linear(48) -> tanh -> GRUCell(48) -> Linear(n_actions).
+    network   build step 6.  flatten(9,9,15) -> Linear(48) -> tanh -> GRUCell(48) -> Linear(n_actions).
               The parameter count is NOT repeated here. Run `uv run python configs/default.py`;
               n_params() is the single source and a transcribed number goes stale silently. DEV-010
               parameters. The architecture is a single disclosed prior and only weights evolve

@@ -18,7 +18,7 @@ import pytest
 from configs.default import DEFAULT
 from src.agent import network as net
 from src.evo import genome
-from src.measure import learnability
+from src.measure import engagement, learnability
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -49,7 +49,8 @@ def test_the_grid_is_the_one_ruled():
     assert len(one) == len(two) == 9
     assert {s["damage"] for s in one} == {DEFAULT.damage} and {s["damage"] for s in two} == {50.0}
     assert {s["h_regen"] for s in one} == {0.25, 0.1, 0.0} and {s["p_wander"] for s in one} == {0.0, 0.5, 1.0}
-    assert cal.SEEDS == (100, 101, 102) and cal.MEASURE_AFTER == (100, 300) and cal.EPISODES == 16
+    assert cal.SEEDS == (100, 101, 102) and cal.MEASURE_AFTER == (100, 300)
+    assert cal.EPISODES == 64 and cal.STAGE_EPISODES == 16  # Q-061 and D-092; stages 1 to 3 ran at 16
     assert not set(cal.SEEDS) & set(range(40)), (
         "calibration seeds must be disjoint from Phase A and the long run"
     )
@@ -122,6 +123,14 @@ def test_the_learnability_columns_are_the_replays_columns():
     assert learnability.ENG_FIELDS == cal.rf.ENGAGEMENT_FIELDS
 
 
+def test_the_replay_and_the_calibration_count_engagements_with_one_implementation():
+    """Identity, not equality of behaviour: a second copy would pass any behavioural comparison until the
+    day it drifted. The sweep's in-run S4 is pinned the same way in its own tests."""
+    assert cal.rf.engagement_counts is engagement.engagement_counts
+    assert cal.rf.make_engagement_pass is engagement.make_engagement_pass
+    assert cal.engagement is engagement
+
+
 def test_exactly_n_eng_min_decided_engagements_is_defined_and_one_fewer_is_not():
     """The floor is inclusive (D-076, "at least"). Tested AT the boundary, the one value where >= and > differ."""
     eng = np.zeros((1, 2, 1, len(learnability.ENG_FIELDS)), np.int32)
@@ -180,8 +189,109 @@ def test_the_calibrations_evolution_is_the_sweeps_and_its_measurement_repeats():
     assert np.array_equal(ours["fit_mean"], theirs["fit_mean"])
     static, _ = cal.build_world(p, 100)
     unflatten = genome.unflattener(net.init_params(jax.random.key(100), p))
-    eng_pass = cal.rf.make_engagement_pass(unflatten, p)
-    again = cal.measure(eng_pass, jnp.asarray(ours["pop"]), static, 100, 3, 2)
+    eng_pass = engagement.make_engagement_pass(unflatten, p)
+    again = engagement.measure(eng_pass, jnp.asarray(ours["pop"]), static, 100, 3, 2)
     assert np.array_equal(again[0], ours["measured"][3][0]) and np.array_equal(
         again[1], ours["measured"][3][1]
     )
+
+
+def test_a_recheck_runs_one_named_setting_in_its_own_directory(tmp_path, capsys):
+    """Checklist 4.5: the frozen setting re-checked on the A6000 with the widened network. One setting, never into
+    the calibration's own directory, and an unknown tag is refused rather than silently running nothing."""
+    one = cal.tag(cal.settings(2)[4])
+    assert cal.main([str(tmp_path / "s4-recheck"), "--stage", "2", "--only", one, "--plan-only"]) == 0
+    out = capsys.readouterr().out
+    assert "1 settings x 3 seeds (103, 104, 105)" in out and one in out, "the re-check uses its fresh seeds"
+    with pytest.raises(SystemExit, match="not a stage 1 setting"):
+        cal.main([str(tmp_path / "s4-recheck"), "--only", one, "--plan-only"])
+    with pytest.raises(SystemExit, match="named for a recheck"):
+        cal.main([str(tmp_path / "calibration-s4"), "--stage", "2", "--only", one, "--plan-only"])
+
+
+def test_the_recheck_reads_the_frozen_setting_itself():
+    """Session 2 runs `--frozen`, so the A6000 re-checks exactly what configs/frozen_world.py holds."""
+    s = cal.settings(2)[7]
+    world = dict(s)
+    assert cal.frozen_setting(world) == (2, cal.tag(s))
+    assert cal.frozen_setting(dict(cal.settings(1)[0]))[0] == 1
+    with pytest.raises(SystemExit, match="nothing has been frozen"):
+        cal.frozen_setting(None)
+    with pytest.raises(SystemExit, match="not a setting"):
+        cal.frozen_setting({"h_regen": 0.05, "p_wander": 0.5, "damage": 34.0})
+
+
+# ------------------------------------------------------------------------------------------- stage 3 ----
+def test_stage_3_moves_only_cue_dependence_and_wandering():
+    s3 = cal.settings(3)
+    assert len(s3) == 10
+    assert {s["cue_dependence"] for s in s3} == {0.6, 0.7, 0.75, 0.8, 0.85}
+    assert {s["p_wander"] for s in s3} == {0.5, 1.0}
+    assert all(s["h_regen"] == DEFAULT.h_regen and s["damage"] == DEFAULT.damage for s in s3)
+    assert all(cal.n_moved(s) == 2 for s in s3)
+    # stage 1 and 2 tags are unchanged by adding a fourth movable field, so their files still resolve
+    assert cal.tag(cal.settings(1)[0]) == "h_regen0.25__p_wander0__damage34"
+    assert cal.tag(s3[0]) == "h_regen0.25__p_wander0.5__damage34__cue_dependence0.6"
+
+
+def test_stage_3_runs_only_after_stages_1_and_2_chose_nothing():
+    done = {"status": "complete", "chosen": None}
+    assert cal.stage3_allowed(done, done)[0]
+    assert not cal.stage3_allowed(done, None)[0]
+    assert not cal.stage3_allowed({"status": "complete", "chosen": "x"}, done)[0]
+    assert not cal.stage3_allowed(done, {"status": "incomplete", "chosen": None})[0]
+
+
+def test_the_frozen_setting_resolves_in_stage_3_too():
+    s = cal.settings(3)[5]
+    assert cal.frozen_setting(dict(s)) == (3, cal.tag(s))
+
+
+# ------------------------------------------------------------------------------- the frozen choice, D-092 ----
+def test_the_calibration_world_does_not_depend_on_the_frozen_world(monkeypatch):
+    """`params_for` must be the scripted world plus the setting whatever configs/frozen_world.py holds. Built on the
+    sweep's frozen arm instead, a frozen cue_dependence would leak into stage 1 and 2 settings, which do not name it,
+    and runs 53, 55 and 56 would stop reproducing with no error."""
+    from configs import frozen_world
+
+    every = [s for n in cal.STAGES for s in cal.settings(n)]
+    monkeypatch.setattr(frozen_world, "WORLD", None)
+    unfrozen = [cal.params_for(s) for s in every]
+    monkeypatch.setattr(
+        frozen_world, "WORLD", {"h_regen": 0.0, "p_wander": 1.0, "damage": 50.0, "cue_dependence": 0.6}
+    )
+    assert [cal.params_for(s) for s in every] == unfrozen
+    # the precondition that makes this able to fail: the frozen world does move the sweep's own treatment arm
+    assert cal.sweep.params_for("treatment", "baseline", None) != cal.sweep.BY_NAME["scripted"].params
+
+
+def test_the_long_run_runs_in_the_world_the_calibration_chose():
+    """The identity the freeze exists for: the long run's treatment world IS the calibration's world for WORLD."""
+    from configs import frozen_world
+
+    assert frozen_world.WORLD is not None
+    stage, t = cal.frozen_setting(frozen_world.WORLD)
+    assert stage == 3
+    assert cal.params_for(frozen_world.WORLD) == cal.sweep.params_for("treatment", "baseline", None)
+    run = frozen_world.SOURCE.split(",")[0]
+    assert run.startswith("run ")
+    rows = (ROOT / "runs.md").read_text().splitlines()
+    assert any(r.startswith(f"| {run.split()[1]} |") and t in r for r in rows), (
+        f"SOURCE names {run}, which must be a row of runs.md that names the chosen setting {t}"
+    )
+
+
+def test_the_long_run_measures_s4_with_the_budget_the_world_was_chosen_by():
+    assert cal.sweep.S4_EPISODES == cal.EPISODES
+
+
+def test_a_file_of_another_budget_is_neither_resumed_nor_summarised(tmp_path):
+    f = tmp_path / "x.npz"
+    np.savez(f, schema_version=np.int32(cal.SCHEMA_VERSION), episodes=np.int32(16), eng_100=0, eng_300=0)
+    assert cal.file_ok(f, (100, 300), 16)
+    assert not cal.file_ok(f, (100, 300), 64)
+
+
+def test_the_recheck_uses_seeds_the_choice_was_not_made_on():
+    assert not set(cal.RECHECK_SEEDS) & set(cal.SEEDS)
+    assert not set(cal.RECHECK_SEEDS) & (set(range(40)) | set(range(200, 216)) | {230})

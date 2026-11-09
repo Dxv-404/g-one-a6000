@@ -63,17 +63,20 @@ import argparse
 import dataclasses
 import gc
 import json
+import os
 import pathlib
 import re
 import sys
 import time
 import traceback
+import zipfile
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 import src  # noqa: F401  runtime control, before any JAX operation
+from configs import frozen_world
 from configs.default import DEFAULT, check_invariants, make_relax_ladder
 from configs.run_configs import BY_NAME
 from src.agent import network as net
@@ -82,6 +85,7 @@ from src.env import env as E
 from src.env import grid, resources
 from src.env.perception import build_vis_table, required_radius
 from src.evo import genome, loop
+from src.measure import engagement
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import sweep_monitor as sm  # noqa: E402  host-side reporting only, D-062
@@ -102,6 +106,17 @@ import sweep_monitor as sm  # noqa: E402  host-side reporting only, D-062
 #: a moving bar, so a global re-run at a larger n is the expensive way to answer a local question.
 N_SEEDS = 20
 
+#: **Seeds 20 to 39 for the long run (D-084)**, disjoint from Phase A (0 to 19, runs 42 to 44), the S4
+#: calibration (100 to 102) and session 1's test seeds (200 upward). A seed's VALUE drives its layout, initial
+#: population and key chain; partial checkpoints are named by value and each condition stores its `seeds`.
+SEED_OFFSET = 20
+
+
+def seed_list(n_seeds: int | None = None) -> list[int]:
+    n = N_SEEDS if n_seeds is None else n_seeds
+    return list(range(SEED_OFFSET, SEED_OFFSET + n))
+
+
 #: What one stored accumulator row pools. Each per-genome row is the mean over one episode's `k` prey
 #: (`make_accumulator_pass`), and a population row is the mean of `p_pop` of those, so a row stands for
 #: `p_pop * k` prey-episodes: 2048 at the defaults.
@@ -120,13 +135,22 @@ def pooled(mean_row: np.ndarray) -> np.ndarray:
     return np.asarray(mean_row, np.float64) * POOLED_PREY_EPISODES
 
 
-#: 300, with the trajectory reported rather than an endpoint. Owner's ruling: neither 300 nor 900 converges,
-#: run 1 measured 300 at 45.9 percent of the 900-generation gain, and choosing 900 buys a longer unfinished
-#: process for three times the compute. The reporting commitment is what makes the cheaper budget defensible,
-#: and it was made for an independent reason: generation zero is 98 percent still, so an endpoint-against-
-#: start reading would be meaningless whatever the budget.
-N_GENERATIONS = 300
+#: **1,500, fixed in advance, by owner ruling (D-073, confirmed at D-081).** A budget, not a plateau: run 51
+#: could not say whether 1,500 reaches 67 or 97 percent of the eventual gain, and every run's full fitness
+#: trajectory is reported (D-040). The scripted control never runs longer (D-086). Phase A ran 300.
+N_GENERATIONS = 1500
 SAMPLE_EVERY = 25
+
+#: **S4 measured IN the run (D-083, checklist 3.3)**, so it never again needs a replay (Q-053). After each of
+#: these generation counts, every genome of an arm whose world has a predator is measured over
+#: `S4_EPISODES` episodes by `src.measure.engagement.measure`, the code the calibration uses, with keys that
+#: never touch the evolution's chain. Seven points rather than all 61 samples, and seven points still show
+#: whether learnability is SUSTAINED, which the ignition criterion asks. **64 episodes since Q-061** (run 58,
+#: D-092), the calibration's budget, so the long run's S4 is the rule the world was chosen by. Measured on the
+#: laptop at about 30 s a measurement, roughly 20 generations, so the seven points add about 9 percent of a
+#: condition, against about 3 at 16.
+S4_AFTER = (100, 300, 500, 750, 1000, 1250, 1500)
+S4_EPISODES = 64
 
 ACC_FIELDS = E.Accumulators._fields
 OUTCOME_FIELDS = ("predated", "starved", "survived")
@@ -167,13 +191,37 @@ SMOKE_MARKER = "SMOKE_RUN"
 TRACE_EVENT = "/jax/core/compile/jaxpr_trace_duration"
 
 
+#: Axes whose frozen value may sit between levels (Q-060 proposed it for `cue_dependence` alone).
+REPLACEABLE = frozenset({"cue_dependence"})
+
+
+def axis_levels(axis: str, world: dict | None = None) -> tuple:
+    """An axis's levels with the frozen world's value on it (Q-060). ONLY for the axes in `REPLACEABLE`: a frozen
+    value there that is not already a level REPLACES the nearest interior level, so the axis keeps both ends, five
+    levels and the map its shape. Every other axis is returned unchanged, so a frozen value off its levels is
+    refused by `require_frozen_world`, as before Q-060."""
+    world = frozen_world.WORLD if world is None else world
+    levels = LEVELS[axis]
+    if axis not in REPLACEABLE or not world or axis not in world:
+        return levels
+    v = world[axis]
+    if v in levels or not (min(levels) < v < max(levels)):
+        return levels
+    interior = levels[1:-1]
+    nearest = min(interior, key=lambda lv: (abs(lv - v), lv))
+    return tuple(sorted(v if lv == nearest else lv for lv in levels))
+
+
 def conditions(arm: str) -> list[tuple[str, object]]:
     """(axis, level) pairs for one arm, with `("baseline", None)` first. Derived, never transcribed."""
     out: list[tuple[str, object]] = [("baseline", None)]
-    for axis, levels in LEVELS.items():
+    for axis in LEVELS:
+        levels = axis_levels(axis)
         if arm == "null" and axis in PREDATOR_ONLY:
             continue
-        picked = [lv for lv in levels if lv != getattr(DEFAULT, axis)]
+        # Around the long run's own baseline: if the frozen world moved this axis, its old default becomes a
+        # level and the frozen value is the baseline, so the map never repeats its own baseline (D-083).
+        picked = [lv for lv in levels if lv != getattr(arm_base("scripted"), axis)]
         if arm == "third":
             picked = [levels[0], levels[-1]]  # both ends only
         out.extend((axis, lv) for lv in picked)
@@ -220,8 +268,15 @@ def make_accumulator_pass(unflatten, static, params):
     return run
 
 
+def arm_base(run_config: str):
+    """A run configuration with the long run's frozen world applied (configs/frozen_world.py, D-083). Each arm
+    keeps the field that defines it, because `apply` changes a field only where the arm agrees with the
+    scripted control."""
+    return frozen_world.apply(BY_NAME[run_config].params, BY_NAME["scripted"].params)
+
+
 def params_for(arm: str, axis: str, level) -> object:
-    base = BY_NAME[ARMS[arm]].params
+    base = arm_base(ARMS[arm])
     p = base if axis == "baseline" else dataclasses.replace(base, **{axis: level})
     check_invariants(p)
     return p
@@ -258,6 +313,14 @@ def one_seed(p, seed: int, eval_params=None, *, n_generations: int | None = None
     step = loop.make_generation_step(unflatten, static, p)
     acc_pass = make_accumulator_pass(unflatten, static, p)
     key = jax.random.key(seed + 2)
+    n_gen_planned = N_GENERATIONS if n_generations is None else n_generations
+    eng_pass = engagement.make_engagement_pass(unflatten, p) if p.n_pred > 0 else None
+    s4_after = [a for a in S4_AFTER if a <= n_gen_planned] if eng_pass is not None else []
+    if s4_after:
+        # Compiled here, before the loop and before the monitor arms its recompile guard, by one discarded
+        # measurement of the initial population. Its keys are measurement keys, so the run cannot see it.
+        engagement.measure(eng_pass, pop, static, seed, 0, 1)
+    s4_eng, s4_prey, final_rows = [], [], None
 
     n_gen = N_GENERATIONS if n_generations is None else n_generations
     fit_mean = np.zeros(n_gen, np.float32)
@@ -272,10 +335,23 @@ def one_seed(p, seed: int, eval_params=None, *, n_generations: int | None = None
         acc_row = None
         if gen % SAMPLE_EVERY == 0 or gen == n_gen - 1:
             gens.append(gen)
-            acc_row = acc_pass(ka, pop)
+            if gen == n_gen - 1:
+                # Per-genome rows at the final generation, for every arm (checklist 3.4). `acc_pass` IS the mean
+                # of these rows, so the stored sample is bit-identical to what it was.
+                final_rows = acc_pass.all(ka, pop)
+                acc_row = final_rows.mean(axis=0)
+            else:
+                acc_row = acc_pass(ka, pop)
             accs.append(acc_row)
+        wall = (
+            time.perf_counter() - t_gen
+        )  # before the S4 pass, so a measurement never reads as a slow generation
+        if gen + 1 in s4_after:
+            eng, prey = engagement.measure(eng_pass, pop, static, seed, gen + 1, S4_EPISODES)
+            s4_eng.append(eng)
+            s4_prey.append(prey.astype(np.int32).sum(axis=-1))  # (G, E, 6): per genome and episode, over prey
         if progress is not None:
-            progress.generation(gen, time.perf_counter() - t_gen, f, acc_row)
+            progress.generation(gen, wall, f, acc_row)
     if progress is not None:
         progress.loop_end()
     out = {
@@ -284,10 +360,18 @@ def one_seed(p, seed: int, eval_params=None, *, n_generations: int | None = None
         "gens": np.array(gens, np.int32),
         "acc": np.stack(accs),
         "relax": int(relax),
-        # **The final population is kept.** 71.5 MB per seed at 69,814 parameters, which is what makes
+        # **The final population is kept.** 71.5 MB per seed at Phase A's 69,814 parameters (D-085 adds 3,888), which is what makes
         # a final-generation quantity re-evaluable under a changed accumulator set without re-evolving,
         # and what the naive_eval pass consumes. D-059.
         "final_pop": np.asarray(pop, np.float32),
+        "final_rows": np.asarray(final_rows, np.float32),
+        "s4_after": np.array(s4_after[: len(s4_eng)], np.int32),
+        "s4_eng": np.stack(s4_eng)
+        if s4_eng
+        else np.zeros((0, p.p_pop, S4_EPISODES, len(engagement.ENGAGEMENT_FIELDS)), np.int32),
+        "s4_prey": np.stack(s4_prey)
+        if s4_prey
+        else np.zeros((0, p.p_pop, S4_EPISODES, len(engagement.PREY_FIELDS)), np.int32),
     }
     if eval_params is not None:
         ob_e = grid.make_obstacle_grid(
@@ -353,6 +437,19 @@ def assert_checkpoint_schema(path: pathlib.Path) -> None:
             f"{path.name} carries no `final_pop`. It predates D-059, so the null cannot be produced from it "
             "and no final-generation quantity can be re-evaluated. Archive it and re-run the condition."
         )
+    if path.parent.name != "partial":
+        missing_long = [k for k in LONGRUN_KEYS if k not in keys]
+        if missing_long:
+            raise SystemExit(
+                f"{path.name} carries no {missing_long}. It predates the long run's runner (in-run S4, per-genome "
+                "final rows, the seed values, the frozen world), so the analysis cannot read it. Archive it and "
+                "re-run the condition."
+            )
+    elif any(k not in keys for k in ("final_rows", "s4_after", "s4_eng", "s4_prey")):
+        raise SystemExit(
+            f"{path.name} is a partial seed without the in-run S4 or the final rows. It predates the long run's "
+            "runner. Delete it; the seed will be recomputed."
+        )
     if arm == "null" and "naive_acc" not in keys:
         raise SystemExit(
             f"{path.name} is a null-arm checkpoint with no `naive_acc`. The experiment's null is missing "
@@ -387,7 +484,22 @@ def assert_same_code(path: pathlib.Path, code_commit: str | None) -> None:
         )
 
 
-_PARTIAL_KEYS = ("fit_mean", "fit_max", "gens", "acc", "final_pop", "naive_acc", "naive_acc_per_genome")
+_PARTIAL_KEYS = (
+    "fit_mean",
+    "fit_max",
+    "gens",
+    "acc",
+    "final_pop",
+    "naive_acc",
+    "naive_acc_per_genome",
+    "final_rows",
+    "s4_after",
+    "s4_eng",
+    "s4_prey",
+)
+#: Every condition checkpoint carries these since the long run's runner (checklist 3.3, 3.4); one without them
+#: predates it and is refused, as a checkpoint without `final_pop` is.
+LONGRUN_KEYS = ("final_rows", "s4_after", "s4_eng", "s4_prey", "seeds", "world")
 
 
 def _save_partial(path: pathlib.Path, arm: str, r: dict, code_commit: str | None = None) -> None:
@@ -401,7 +513,7 @@ def _save_partial(path: pathlib.Path, arm: str, r: dict, code_commit: str | None
         relax=np.int32(r["relax"]),
         **{k: r[k] for k in _PARTIAL_KEYS if k in r},
     )
-    tmp.replace(path)
+    durable_replace(tmp, path)
 
 
 def _load_partial(path: pathlib.Path) -> dict:
@@ -409,6 +521,50 @@ def _load_partial(path: pathlib.Path) -> dict:
         r = {k: np.asarray(d[k]) for k in _PARTIAL_KEYS if k in d.files}
         r["relax"] = int(d["relax"])
     return r
+
+
+def durable_replace(tmp: pathlib.Path, path: pathlib.Path) -> None:
+    """Rename a finished temporary file over `path` so that a MACHINE crash cannot leave a named but empty file.
+
+    The rename alone protects against a killed process, not a crashed host: after the Windows bugcheck of
+    2026-11-07 a calibration file survived as its name with 0 bytes, because the rename reached the disk and
+    the contents had not (DEV-041). So the contents are forced to disk first, then the rename, then the
+    directory entry."""
+    fd = os.open(tmp, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp.replace(path)
+    dfd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def readable(path: pathlib.Path) -> bool:
+    """True if `path` is a complete npz: non-empty, a valid zip, every member intact. Says nothing about its
+    schema, which `assert_checkpoint_schema` checks and which stops the run when wrong."""
+    try:
+        if path.stat().st_size == 0:
+            return False
+        with zipfile.ZipFile(path) as z:
+            return z.testzip() is None
+    except (OSError, zipfile.BadZipFile, EOFError):
+        return False
+
+
+def set_aside(path: pathlib.Path) -> pathlib.Path:
+    """Move an unreadable checkpoint out of the way, kept for inspection, so the work is redone rather than the
+    run crashing on it at every restart. The move is reported by the caller."""
+    dest = path.with_name(path.name + ".unreadable")
+    n = 1
+    while dest.exists():
+        dest = path.with_name(f"{path.name}.unreadable{n}")
+        n += 1
+    path.replace(dest)
+    return dest
 
 
 def condition_tag(arm: str, axis: str, level) -> str:
@@ -424,6 +580,16 @@ def verify_written_checkpoint(path: pathlib.Path) -> None:
     """
     assert_checkpoint_schema(path)
     with np.load(path, allow_pickle=True) as d:
+        # The planned points that fit this condition's budget: all of S4_AFTER in the long run, none in a
+        # three-generation smoke test. A condition missing any of them stops the run.
+        if str(d["arm"]) != "null":
+            want = tuple(a for a in S4_AFTER if a <= int(d["n_generations"]))
+            got = tuple(int(x) for x in d["s4_after"])
+            if got != want:
+                raise sm.FatalStop(
+                    f"{path.name}: S4 was measured after {got}, not the planned {want}. The condition would "
+                    "enter the dataset without the learnability trajectory the plan promises."
+                )
         for k in ("fit_mean", "fit_max", "final_mean", "sample_acc"):
             if not np.all(np.isfinite(d[k])):
                 raise sm.FatalStop(
@@ -459,6 +625,12 @@ def run_condition(
         extra["n_generations"] = n_gen
     tag = condition_tag(arm, axis, level)
     path = out_dir / f"{tag}.npz"
+    if path.exists() and not readable(path):
+        moved = set_aside(path)
+        print(
+            f"  {path.name} is unreadable (a crash during its write); set aside as {moved.name}, redoing it",
+            flush=True,
+        )
     if path.exists():
         assert_checkpoint_schema(path)
         assert_same_code(path, code_commit)
@@ -469,7 +641,7 @@ def run_condition(
     # `naive_eval`'s declared configuration with this condition's one replacement applied. D-059.
     eval_p = None
     if arm == "null":
-        base = BY_NAME["naive_eval"].params
+        base = arm_base("naive_eval")
         eval_p = base if axis == "baseline" else dataclasses.replace(base, **{axis: level})
         check_invariants(eval_p)
     t0 = time.time()
@@ -479,26 +651,34 @@ def run_condition(
     part_dir = out_dir / "partial"
     part_dir.mkdir(parents=True, exist_ok=True)
     if mon is not None:
-        done_before = sum((part_dir / f"{tag}.seed{s}.npz").exists() for s in range(n_seeds))
+        done_before = sum((part_dir / f"{tag}.seed{s}.npz").exists() for s in seed_list(n_seeds))
         mon.condition_start(index, arm, tag, done_before)
     seeds = []
-    for s in range(n_seeds):
+    # The monitor numbers seeds by position (1 to n) for its progress line; the files and the run use the seed's
+    # VALUE, which is SEED_OFFSET plus the position.
+    for i, s in enumerate(seed_list(n_seeds)):
         pp = part_dir / f"{tag}.seed{s}.npz"
+        if pp.exists() and not readable(pp):
+            moved = set_aside(pp)
+            print(
+                f"  {pp.name} is unreadable (a crash during its write); set aside as {moved.name}, redoing it",
+                flush=True,
+            )
         if pp.exists():
             assert_checkpoint_schema(pp)
             assert_same_code(pp, code_commit)
             seeds.append(_load_partial(pp))
             if mon is not None:
-                mon.seed_skipped(s)
+                mon.seed_skipped(i)
             continue
         if mon is not None:
-            mon.seed_start(s)
+            mon.seed_start(i)
         r = one_seed(p, s, eval_params=eval_p, **extra)
         _save_partial(pp, arm, r, code_commit)
         seeds.append(r)
         # After the partial is on disk, so a stop raised by a health check never costs the finished seed.
         if mon is not None:
-            mon.seed_end(s, float(r["fit_mean"][-1]), float(r["fit_max"][-1]))
+            mon.seed_end(i, float(r["fit_mean"][-1]), float(r["fit_max"][-1]))
 
     finals = np.array([s["fit_mean"][-1] for s in seeds], np.float64)
     acc = np.stack([s["acc"] for s in seeds])  # (seed, sample, field)
@@ -538,6 +718,12 @@ def run_condition(
         relax_levels=np.array([s["relax"] for s in seeds], np.int32),
         wall_seconds=np.float32(wall),
         final_pop=np.stack([s["final_pop"] for s in seeds]),
+        seeds=np.array(seed_list(n_seeds), np.int32),
+        final_rows=np.stack([s["final_rows"] for s in seeds]),
+        s4_after=seeds[0]["s4_after"],
+        s4_eng=np.stack([s["s4_eng"] for s in seeds]),
+        s4_prey=np.stack([s["s4_prey"] for s in seeds]),
+        world=np.array(json.dumps(frozen_world.WORLD)),
         **(
             {
                 "naive_acc": np.stack([s["naive_acc"] for s in seeds]),
@@ -547,10 +733,10 @@ def run_condition(
             else {}
         ),
     )
-    tmp.replace(path)
+    durable_replace(tmp, path)
     # Verified BEFORE the partials go, so a bad checkpoint leaves its seeds on disk to inspect.
     verify_written_checkpoint(path)
-    for s in range(n_seeds):
+    for s in seed_list(n_seeds):
         (part_dir / f"{tag}.seed{s}.npz").unlink(missing_ok=True)
 
     # DEV-029's class, outside the loop it was found in.
@@ -623,7 +809,104 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=f"the whole runner path at {SMOKE_SEEDS} seeds x {SMOKE_GENERATIONS} generations on two conditions, "
         "into a scratch directory. Never into the sweep's directory",
     )
+    ap.add_argument(
+        "--seed-offset",
+        type=int,
+        help="Phase A re-runs only (Q-058): seeds from this value instead of SEED_OFFSET. Refused unless the "
+        "output directory is named for Phase A and the seeds avoid the long run's",
+    )
+    ap.add_argument(
+        "--generations",
+        type=int,
+        help="Phase A re-runs only (Q-058): a budget other than N_GENERATIONS, under the same refusal",
+    )
+    ap.add_argument(
+        "--shard",
+        help="I/N: run only every N-th condition of the plan starting at I, into <out_dir>/shardIofN. N processes with I = 0 to N-1 run the whole plan side by side; how many at once is measured, not assumed (session 1, 4.3)",
+    )
     return ap.parse_args(argv)
+
+
+def parse_shard(text: str | None) -> tuple[int, int] | None:
+    if text is None:
+        return None
+    m = re.fullmatch(r"(\d+)/(\d+)", text.strip())
+    if not m or not (0 <= int(m.group(1)) < int(m.group(2))):
+        raise sm.FatalStop(f"--shard {text!r}: expected I/N with 0 <= I < N, for example 0/4")
+    return int(m.group(1)), int(m.group(2))
+
+
+def shard_plan(plan: list, shard: tuple[int, int] | None) -> list:
+    """Round robin, so each shard gets every arm and a mix of costly and cheap conditions. The shards of one N
+    partition the plan exactly, which `test_longrun_runner.py` asserts."""
+    if shard is None:
+        return plan
+    i, n = shard
+    return [c for j, c in enumerate(plan) if j % n == i]
+
+
+def shard_dir(out_dir: pathlib.Path, shard: tuple[int, int] | None) -> pathlib.Path:
+    return out_dir if shard is None else out_dir / f"shard{shard[0]}of{shard[1]}"
+
+
+def guard_shards(out_dir: pathlib.Path, shard: tuple[int, int] | None) -> None:
+    """Refuse to mix layouts. A resume with a different N would move conditions between shards, and a sharded and
+    an unsharded run in one folder would each redo the other's conditions."""
+    existing = sorted(d.name for d in out_dir.glob("shard*of*") if d.is_dir()) if out_dir.exists() else []
+    if shard is None:
+        if existing:
+            raise sm.FatalStop(
+                f"{out_dir} holds sharded output ({existing}); run it with the same --shard I/N"
+            )
+        return
+    other = [d for d in existing if not d.endswith(f"of{shard[1]}")]
+    if other:
+        raise sm.FatalStop(
+            f"{out_dir} holds shards of a different N ({other}). Resuming with N = {shard[1]} would move conditions "
+            "between shards. Use the N it was started with."
+        )
+    if out_dir.exists() and any(out_dir.glob("*.npz")):
+        raise sm.FatalStop(f"{out_dir} holds unsharded checkpoints; a sharded run will not write beside them")
+
+
+def guard_phase_a(out_dir: pathlib.Path, seed_offset: int | None, generations: int | None) -> None:
+    """A run with other seeds or another budget is a Phase A re-run (Q-058), never part of the long run. It
+    must say so in its directory name, and its seeds may never be the long run's, because the canonical's
+    calibration and confirmatory phases use disjoint seeds."""
+    if seed_offset is None and generations is None:
+        return
+    if "phase-a" not in out_dir.name:
+        raise sm.FatalStop(
+            f"--seed-offset and --generations are for Phase A re-runs only; {out_dir} is not named for one "
+            "(for example runs/phase-a-null)."
+        )
+    if seed_offset is not None:
+        theirs = set(range(SEED_OFFSET, SEED_OFFSET + N_SEEDS))
+        ours = set(range(seed_offset, seed_offset + N_SEEDS))
+        if ours & theirs:
+            raise sm.FatalStop(
+                f"seeds {min(ours)} to {max(ours)} overlap the long run's {min(theirs)} to {max(theirs)}"
+            )
+    if generations is not None and generations < 1:
+        raise sm.FatalStop(f"--generations {generations}: must be at least 1")
+
+
+def require_frozen_world(smoke: bool) -> None:
+    """D-083: the long run runs in the world the S4 calibration chose. Smoke tests may run in any world."""
+    if smoke:
+        return
+    if frozen_world.WORLD is None:
+        raise sm.FatalStop(
+            "the long run's world is not frozen: configs/frozen_world.py WORLD is None. The S4 calibration "
+            "(D-083) chooses it; until then this would run the Phase A world that S4 rejected (run 52)."
+        )
+    frozen_world.check()
+    for axis, value in frozen_world.WORLD.items():
+        if axis in LEVELS and value not in axis_levels(axis):
+            raise sm.FatalStop(
+                f"the frozen {axis} = {value} is not one of the axis levels {LEVELS[axis]}, so the axis would run "
+                "five non-baseline levels instead of four and the plan would change shape."
+            )
 
 
 def guard_smoke(out_dir: pathlib.Path, smoke: bool) -> None:
@@ -650,8 +933,10 @@ def _device_mb() -> float:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global SEED_OFFSET, N_GENERATIONS
     args = parse_args(sys.argv[1:] if argv is None else argv)
     out_dir = args.out_dir
+    shard = None
     mon = None
     lock = None
     try:
@@ -664,11 +949,22 @@ def main(argv: list[str] | None = None) -> int:
         except SystemExit as exc:
             raise sm.FatalStop(f"{exc} Close other programs, then run the same command again.") from None
 
+        guard_phase_a(out_dir, args.seed_offset, args.generations)
+        if args.seed_offset is not None:
+            SEED_OFFSET = args.seed_offset
+        if args.generations is not None:
+            N_GENERATIONS = args.generations
         arms = args.arms.split(",")
         n_seeds, n_gen = (SMOKE_SEEDS, SMOKE_GENERATIONS) if args.smoke else (N_SEEDS, N_GENERATIONS)
         plan = list(SMOKE_PLAN) if args.smoke else [(a, ax, lv) for a in arms for ax, lv in conditions(a)]
         if args.limit is not None:
             plan = plan[: args.limit]
+        shard = parse_shard(args.shard)
+        if shard is not None:
+            full = len(plan)
+            plan = shard_plan(plan, shard)
+            print(f"shard {shard[0]} of {shard[1]}: {len(plan)} of the plan's {full} conditions", flush=True)
+        print(f"seeds {seed_list(n_seeds)[0]} to {seed_list(n_seeds)[-1]}, {n_gen} generations", flush=True)
         print(f"\n{'arm':<11s} {'conditions':>11s}", flush=True)
         for a in sorted({a for a, _ax, _lv in plan}, key=list(ARMS).index):
             print(f"{a:<11s} {sum(1 for x in plan if x[0] == a):11d}", flush=True)
@@ -689,6 +985,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.plan_only:
             print("\n--plan-only, nothing run", flush=True)
             return sm.EXIT_DONE
+        require_frozen_world(args.smoke)
+        print(f"  world: {frozen_world.WORLD} from {frozen_world.SOURCE}", flush=True)
 
         if not args.verified_commit:
             raise sm.FatalStop("pass --verified-commit <sha>; the sweep refuses to start without it")
@@ -696,6 +994,8 @@ def main(argv: list[str] | None = None) -> int:
         assert_commit_verified(sha)
         print(f"  commit {sha} has a recorded full-differential pass\n", flush=True)
 
+        guard_shards(out_dir, shard)
+        out_dir = shard_dir(out_dir, shard)
         guard_smoke(out_dir, args.smoke)
         lock = sm.acquire_run_lock(out_dir)
 
@@ -710,7 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
                 left = 0
             else:
                 left = n_seeds - sum(
-                    (out_dir / "partial" / f"{tag}.seed{s}.npz").exists() for s in range(n_seeds)
+                    (out_dir / "partial" / f"{tag}.seed{s}.npz").exists() for s in seed_list(n_seeds)
                 )
             status_plan.append((a, tag, left))
 

@@ -59,7 +59,7 @@ def _cell(o, dr, dc):
 
 def test_observation_has_exactly_obs_dim_entries():
     o = build_observation(**_scene())
-    assert o.shape == (P.obs_dim,) == (1140,)
+    assert o.shape == (P.obs_dim,) == (1221,)
     assert o.dtype == jnp.float32
 
 
@@ -203,3 +203,37 @@ def test_the_observation_is_vmappable_over_agents():
     )
     out = over_agents(s["prey_pos"], jnp.arange(s["prey_pos"].shape[0]))
     assert out.shape == (3, P.obs_dim)
+
+
+def test_the_reserved_weapon_channel_is_the_last_one_and_is_never_written():
+    """D-085. Every entity, terrain type, posture and motion present at once: channel 14 stays zero. Increment 4 is
+    the first thing allowed to write it. The scene is checked to populate the other channels, so an all-zero
+    patch cannot pass this."""
+    assert obs_mod.CH_WEAPON == P.c_channels - 1 == 14
+    assert P.N_ITEM_CHANNELS == 1
+    obstacles = jnp.zeros((H, W), bool).at[7, 10].set(True)
+    food = jnp.zeros((H, W), jnp.int32).at[9, 9].set(1)
+    target = jnp.zeros((H, W), jnp.int32).at[7, 7].set(1)
+    for posture in (0, 1, 2):
+        s = _scene(
+            obstacles=obstacles,
+            food=food,
+            target=target,
+            prey=[[8, 8], [9, 7], [6, 8]],
+            pred=(10, 8),
+            self_posture=posture,
+        )
+        s["prey_moved"] = jnp.ones(3, bool)
+        s["pred_moved"] = jnp.asarray(True)
+        s["prey_posture"] = jnp.array([0, 1, 2], jnp.int32)
+        patch = _patch(build_observation(**s))
+        assert float(jnp.abs(patch[..., obs_mod.CH_WEAPON]).max()) == 0.0
+        for ch in (
+            obs_mod.CH_OBSTACLE,
+            obs_mod.CH_FOOD,
+            obs_mod.CH_TARGET,
+            obs_mod.CH_PREDATOR,
+            obs_mod.CH_PREY,
+            obs_mod.CH_MOVED,
+        ):
+            assert float(patch[..., ch].max()) > 0.0, f"the scene must populate channel {ch}"

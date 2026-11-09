@@ -1,7 +1,7 @@
-"""The egocentric observation: a 9 by 9 patch of 14 channels, plus 6 scalars.
+"""The egocentric observation: a 9 by 9 patch of 15 channels, plus 6 scalars.
 
 Build step 6. This is where `obs_dim` is fixed for the whole project at
-`s_patch * s_patch * c_channels + N_SCALARS`, which is 1140. **Changing it after step 6 weights exist voids
+`s_patch * s_patch * c_channels + N_SCALARS`, which is 1221 (1140 until D-085 reserved channel 14). **Changing it after step 6 weights exist voids
 every evolved weight**, exactly as `n_actions` does. The value is a derived property on `EnvParams` rather
 than a literal here, so the network and this module cannot disagree about it.
 
@@ -16,6 +16,7 @@ Channels, from the build spec:
     6        cell visible
     7,8,9    entity posture one-hot: upright, crouched, prone
     10..13   appearance feature vector, A = 4
+    14       weapon present, RESERVED: all zeros until increment 4 (D-085)
 
 Scalars: three normalised pools, then the observer's own posture as a three-way one-hot.
 
@@ -24,7 +25,8 @@ Scalars: three normalised pools, then the observer's own posture as a three-way 
 **Channels 7 to 13 are populated and unused.** Posture is inert under the scripted predator, which does not
 read it, and the appearance vector is not consumed by anything in increment 1. They are here because
 increment 2 evolves a response to posture and increment 3 needs the appearance dimension, and because adding
-channels later changes `obs_dim`. CLAUDE.md section 14.
+channels later changes `obs_dim`. CLAUDE.md section 14. **Channel 14 is not even populated**: it is reserved
+for increment 4's weapons (D-085) and nothing writes it, so the patch's initial zeros stand; a test asserts it.
 
 **Out-of-bounds cells read as obstacles.** The grid boundary behaves like a wall, which matches
 `grid.is_obstacle` and means a missing bounds check fails closed rather than open. Every other channel is
@@ -56,6 +58,7 @@ CH_MOVED = 5
 CH_VISIBLE = 6
 CH_POSTURE_FIRST = 7  # 7, 8, 9 upright, crouched, prone
 CH_APPEARANCE_FIRST = 10  # 10 to 13 at a_appearance = 4
+CH_WEAPON = 14  # RESERVED, D-085: increment 4 writes it; until then it is never written
 
 N_POSTURES = 3
 

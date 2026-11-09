@@ -49,8 +49,8 @@ class EnvParams:
 
     # ---------------------------------------------------------- perception --
     r: int = 4
-    """[D] Parameter budget. At c=14 channels, r=5 with hd=64 gives 134,932 parameters, over the
-    100,000 limit. r, c, and hd are coupled and cannot be chosen independently."""
+    """[D] Parameter budget. At c=15 channels (14 before D-085), r=5 with hd=64 gives 142,806 parameters,
+    over the 100,000 limit (134,932 at c=14). r, c, and hd are coupled and cannot be chosen independently."""
     r_pred: int = 4
     """[A] Equal to r by DESIGN CHOICE, not by requirement. An earlier version justified this with
     mutual discovery, which does not entail it: mutual discovery requires only that neither agent
@@ -228,6 +228,7 @@ class EnvParams:
 
     N_BASE_CHANNELS: int = 7  # [D] obstacle, food, target, predator, prey, moved, visible
     N_POSTURE_CHANNELS: int = 3  # [D] upright, crouched, prone one-hot
+    N_ITEM_CHANNELS: int = 1  # [D] D-085: one weapon channel, RESERVED, all zeros until increment 4
     N_SCALARS: int = 6  # [D] 3 normalised pools + 3-way own-posture one-hot
 
     @property
@@ -257,7 +258,7 @@ class EnvParams:
         """[D] Derived, not stored. An earlier version made this a free field alongside
         a_appearance, so changing the appearance width silently left the channel count wrong and
         the parameter budget was computed against a lie. Derive it."""
-        return self.N_BASE_CHANNELS + self.N_POSTURE_CHANNELS + self.a_appearance
+        return self.N_BASE_CHANNELS + self.N_POSTURE_CHANNELS + self.a_appearance + self.N_ITEM_CHANNELS
 
     # ----------------------------------------------------------- evolution --
     p_pop: int = 256  # [C] neuroevolution populations are typically 100-1000

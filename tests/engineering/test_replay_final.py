@@ -29,6 +29,30 @@ _SPEC.loader.exec_module(rf)
 sweep = rf.sweep
 
 
+@pytest.fixture(scope="module", autouse=True)
+def phase_a_world():
+    """The replay re-evaluates Phase A's populations in Phase A's world, and `main` refuses once a world is frozen
+    (D-092), so everything here is tested in that world. Before D-092 these tests held only because WORLD was None.
+
+    **Module scope, so it is in place before `tiny_sweep` builds its checkpoints**: pytest sets up a module-scoped
+    autouse fixture before the module's other module-scoped fixtures. Function-scoped, it was not, and the sweep was
+    built in the frozen world and replayed in Phase A's, which the reproduction guard refused (diff 220)."""
+    from configs import frozen_world
+
+    saved = frozen_world.WORLD
+    frozen_world.WORLD = None
+    yield
+    frozen_world.WORLD = saved
+
+
+def test_the_replay_refuses_once_a_world_is_frozen(monkeypatch):
+    from configs import frozen_world
+
+    monkeypatch.setattr(frozen_world, "WORLD", {"p_wander": 0.5, "cue_dependence": 0.8})
+    with pytest.raises(SystemExit, match="Phase A's world"):
+        rf.main([])
+
+
 # ---------------------------------------------------------------------------------------------- the plan --
 def test_the_plan_counts_follow_from_the_sweep_and_the_exclusions():
     jobs = rf.plan()

@@ -67,7 +67,7 @@ from configs.provenance import (
 
 #: Class constants rather than tunable parameters. They describe the observation's SHAPE, which is fixed for
 #: the project because changing it voids every evolved weight, so they are not design choices to justify.
-NOT_PARAMETERS = frozenset({"N_BASE_CHANNELS", "N_POSTURE_CHANNELS", "N_SCALARS"})
+NOT_PARAMETERS = frozenset({"N_BASE_CHANNELS", "N_POSTURE_CHANNELS", "N_ITEM_CHANNELS", "N_SCALARS"})
 
 PARAM_NAMES = frozenset(f.name for f in fields(EnvParams)) - NOT_PARAMETERS
 
@@ -394,7 +394,12 @@ def test_the_terminator_distribution_matches_exactly():
 #: gate would silently under-cover as the project grows, and its passing would mean less each step without
 #: saying so. That is the same shape as every other finding here: complete over what it knows about, and
 #: nothing tells it what it does not know about.
-CONFIG_MODULES_WITH_PARAMETERS = frozenset({"default.py", "analysis.py"})
+CONFIG_MODULES_WITH_PARAMETERS = frozenset({"default.py", "analysis.py", "frozen_world.py"})
+
+#: `frozen_world.py` arrived with the long run's runner (D-083) and this gate caught it too. Covered, not
+#: exempt: its values change every result of the long run. Its provenance is not a class tag but a REFERENCE,
+#: the registered calibration run named in `SOURCE`, and its values are confined to Q-057's grid by
+#: `frozen_world.check` and `sweep.require_frozen_world`.
 
 #: `analysis.py` arrived at step 11 and this gate caught it, which is what the note above predicted. It is
 #: covered rather than exempt: it holds values that can change a reported result, so it is held to the class

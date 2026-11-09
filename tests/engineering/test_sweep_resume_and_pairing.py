@@ -40,6 +40,7 @@ def _write_checkpoint(path: pathlib.Path, fields, arm: str = "treatment") -> Non
         arm=np.array(arm),
         final_pop=np.zeros((1, 1), np.float32),
         sample_acc=np.zeros((2, 2, len(fields))),
+        **{k: np.zeros(1) for k in sweep.LONGRUN_KEYS},
     )
 
 
@@ -158,6 +159,12 @@ def _stub_one_seed(calls: list):
             "acc": np.zeros((2, n_cols), np.float32),
             "relax": 0,
             "final_pop": np.full((4, 3), float(seed), np.float32),
+            "final_rows": np.full((4, n_cols), float(seed), np.float32),
+            # In-run S4 exactly where the real runner measures it: in a world with a predator, at every
+            # planned point. The runner refuses a condition without it (checklist 3.3).
+            "s4_after": np.array(sweep.S4_AFTER if p.n_pred > 0 else (), np.int32),
+            "s4_eng": np.zeros((len(sweep.S4_AFTER) if p.n_pred > 0 else 0, 4, 2, 7), np.int32),
+            "s4_prey": np.zeros((len(sweep.S4_AFTER) if p.n_pred > 0 else 0, 4, 2, 6), np.int32),
         }
         if eval_params is not None:
             r["naive_acc_per_genome"] = np.full((4, n_cols), float(seed), np.float32)
@@ -180,7 +187,8 @@ def test_a_condition_keeps_the_final_population_of_every_seed(tmp_path, stubbed)
     (path,) = tmp_path.glob("*.npz")
     with np.load(path) as d:
         assert d["final_pop"].shape == (3, 4, 3)
-        assert [float(x) for x in d["final_pop"][:, 0, 0]] == [0.0, 1.0, 2.0]
+        assert [float(x) for x in d["final_pop"][:, 0, 0]] == [float(s) for s in sweep.seed_list(3)]
+        assert [int(s) for s in d["seeds"]] == sweep.seed_list(3)
         assert "naive_acc" not in d.files, "only the null arm carries a naive_eval pass"
     assert not list((tmp_path / "partial").glob("*.npz")), "partials are removed once the condition is whole"
 
@@ -211,7 +219,7 @@ def test_the_null_arm_evaluates_in_the_predator_world_at_the_same_axis_level(tmp
 
 def _crashing_after_seed_zero(real):
     def one_seed(p, seed: int, eval_params=None):
-        if seed == 1:
+        if seed == sweep.SEED_OFFSET + 1:
             raise RuntimeError("simulated crash after seed 0 finished")
         return real(p, seed, eval_params)
 
@@ -225,17 +233,21 @@ def test_a_crash_mid_condition_costs_only_the_unfinished_seeds(tmp_path, monkeyp
     monkeypatch.setattr(sweep, "one_seed", _crashing_after_seed_zero(real))
     with pytest.raises(RuntimeError):
         sweep.run_condition("treatment", "baseline", None, tmp_path)
-    assert [s for s, _ in calls] == [0]
-    assert len(list((tmp_path / "partial").glob("*.seed0.npz"))) == 1, "seed 0's partial survives the crash"
+    assert [s for s, _ in calls] == sweep.seed_list(1)
+    assert len(list((tmp_path / "partial").glob(f"*.seed{sweep.SEED_OFFSET}.npz"))) == 1, (
+        "the first seed's partial survives the crash"
+    )
     assert not list(tmp_path.glob("*.npz")), "no condition file was written for a half-finished condition"
 
     calls.clear()
     monkeypatch.setattr(sweep, "one_seed", real)
     sweep.run_condition("treatment", "baseline", None, tmp_path)
-    assert [s for s, _ in calls] == [1, 2], "seed 0 came from its partial and was not recomputed"
+    assert [s for s, _ in calls] == sweep.seed_list(3)[1:], (
+        "the first seed came from its partial, not recomputed"
+    )
     (path,) = tmp_path.glob("*.npz")
     with np.load(path) as d:
-        assert [float(x) for x in d["final_pop"][:, 0, 0]] == [0.0, 1.0, 2.0], (
+        assert [float(x) for x in d["final_pop"][:, 0, 0]] == [float(s) for s in sweep.seed_list(3)], (
             "the resumed seed's data is intact"
         )
     assert not list((tmp_path / "partial").glob("*.npz"))
@@ -255,7 +267,7 @@ def test_the_resume_test_can_fail(tmp_path, monkeypatch):
     calls.clear()
     monkeypatch.setattr(sweep, "one_seed", real)
     sweep.run_condition("treatment", "baseline", None, tmp_path)
-    assert [s for s, _ in calls] == [0, 1, 2]
+    assert [s for s, _ in calls] == sweep.seed_list(3)
 
 
 def test_a_stale_partial_is_refused_rather_than_resumed(tmp_path, stubbed):
@@ -265,7 +277,7 @@ def test_a_stale_partial_is_refused_rather_than_resumed(tmp_path, stubbed):
     part.mkdir()
     stale = [f for f in sweep.EXPECTED_SCHEMA if not (f.endswith("_near") or f.endswith("_far"))]
     np.savez(
-        part / "treatment__baseline__None.seed0.npz",
+        part / f"treatment__baseline__None.seed{sweep.SEED_OFFSET}.npz",  # the first seed the plan reads
         arm=np.array("treatment"),
         acc_fields=np.array(stale),
         final_pop=np.zeros((4, 3), np.float32),
@@ -282,13 +294,30 @@ def test_the_guard_requires_the_final_population(tmp_path):
         sweep.assert_checkpoint_schema(p)
 
 
+def _longrun(**kw):
+    """The long run's keys, so a guard test isolates the one key it is about."""
+    return {k: np.zeros(1) for k in sweep.LONGRUN_KEYS} | kw
+
+
 def test_the_guard_requires_the_null_arm_to_carry_its_naive_eval(tmp_path):
     n = tmp_path / "n.npz"
-    np.savez(n, acc_fields=np.array(sweep.EXPECTED_SCHEMA), arm=np.array("null"), final_pop=np.zeros(1))
+    np.savez(
+        n,
+        acc_fields=np.array(sweep.EXPECTED_SCHEMA),
+        arm=np.array("null"),
+        final_pop=np.zeros(1),
+        **_longrun(),
+    )
     with pytest.raises(SystemExit, match="naive_acc"):
         sweep.assert_checkpoint_schema(n)
     t = tmp_path / "t.npz"
-    np.savez(t, acc_fields=np.array(sweep.EXPECTED_SCHEMA), arm=np.array("treatment"), final_pop=np.zeros(1))
+    np.savez(
+        t,
+        acc_fields=np.array(sweep.EXPECTED_SCHEMA),
+        arm=np.array("treatment"),
+        final_pop=np.zeros(1),
+        **_longrun(),
+    )
     sweep.assert_checkpoint_schema(t)  # a non-null arm without one is whole
 
 

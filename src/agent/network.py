@@ -3,7 +3,7 @@
     flatten(S, S, C) -> Linear(Hd) -> tanh -> GRUCell(Hd) -> Linear(n_actions)
 
 Build step 6. This is the last point at which `obs_dim` and `n_actions` are cheap to change; both are now
-fixed, at 1140 and 22.
+fixed, at 1221 and 22. `obs_dim` was 1140 until D-085 reserved a weapon channel before the long run.
 
 ### Why this is hand-written when the build spec says Equinox or Flax
 

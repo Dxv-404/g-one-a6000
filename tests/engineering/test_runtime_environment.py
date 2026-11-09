@@ -154,3 +154,54 @@ def test_the_runtime_check_refuses_a_process_without_the_cache():
 
 def test_this_process_has_the_cache_configured():
     assert src.assert_runtime_took_effect()["cache_dir"]
+
+
+# ------------------------------------------------------------------- the startup race, DEV-040 ----
+def test_two_writability_probes_never_share_a_file(tmp_path):
+    """DEV-040. The probe was a fixed `.writable`, so two processes starting together could each create it and
+    the second to delete it died. Two probes must use different files, and neither may be left behind."""
+    a = src.probe_writable(str(tmp_path))
+    b = src.probe_writable(str(tmp_path))
+    assert a != b
+    assert not list(tmp_path.iterdir()), "a probe file was left behind"
+
+
+_RACER = """
+import os, sys, time
+go = sys.argv[1]
+while not os.path.exists(go):
+    time.sleep(0.001)
+import src
+print("OK")
+"""
+
+
+def test_many_processes_starting_at_once_all_get_past_the_runtime_control(tmp_path):
+    """The behavioural witness: 16 processes released at the same instant against one fresh cache home, the
+    situation the A6000's six-process round met. Every one must start. Probabilistic on its own, which is why
+    the deterministic test above exists; this one checks the cure in the setting where the defect appeared."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("JAX_")}
+    env["XDG_CACHE_HOME"] = str(tmp_path / "home")
+    go = tmp_path / "GO"
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _RACER, str(go)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(16)
+    ]
+    go.write_text("go")
+    results = [p.communicate(timeout=120) for p in procs]
+    failed = [
+        err[-300:]
+        for (out, err), p in zip(results, procs, strict=True)
+        if p.returncode != 0 or "OK" not in out
+    ]
+    assert not failed, f"{len(failed)} of 16 processes died at startup: {failed[:1]}"

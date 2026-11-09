@@ -35,9 +35,9 @@ def obs():
 
 
 def test_obs_dim_is_what_the_config_derives():
-    """1140 = 9 * 9 * 14 + 6, and the network reads it from the config rather than a literal."""
+    """1221 = 9 * 9 * 15 + 6 (D-085 reserved channel 14), and the network reads it from the config."""
     assert P.obs_dim == P.s_patch * P.s_patch * P.c_channels + P.N_SCALARS
-    assert P.obs_dim == 1140
+    assert P.obs_dim == 1221
 
 
 def test_forward_produces_one_logit_per_action(weights, obs):

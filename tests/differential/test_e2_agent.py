@@ -113,7 +113,22 @@ def test_observation_matches_the_oracle_for_every_agent(cfg_i):
 
 
 def test_observation_coverage_is_sufficient():
-    """The channels this gate claims to compare must actually be non-zero somewhere."""
+    """The channels this gate claims to compare must actually be non-zero somewhere.
+
+    **Except the reserved weapon channel, which must be zero EVERYWHERE instead**, D-085. It is all zeros
+    until increment 4 by design, so "non-zero somewhere" is a property the design forbids it, and comparing
+    two arrays of zeros witnesses nothing. The negative form is the one that can fail: increment 4 writing
+    the channel turns this red, which is the signal to delete the exemption rather than edit it. Same shape
+    as `is_reserved` for actions. The reserved set is pinned to exactly `CH_WEAPON` so a channel that goes
+    dead for some other reason cannot be absorbed into it silently.
+    """
+    from src.env.observation import CH_WEAPON
+
+    reserved = list(range(P.c_channels - P.N_ITEM_CHANNELS, P.c_channels))
+    assert reserved == [CH_WEAPON], (
+        f"the reserved channels {reserved} are not exactly the weapon channel {CH_WEAPON}; a new reserved "
+        "channel needs its own decision, not this exemption"
+    )
     seen = np.zeros(P.c_channels, dtype=bool)
     for cfg in CONFIGS:
         s = _scenario(cfg)
@@ -137,8 +152,12 @@ def test_observation_coverage_is_sufficient():
             )
             patch = o[: P.s_patch * P.s_patch * P.c_channels].reshape(-1, P.c_channels)
             seen |= patch.max(axis=0) > 0.0
+            assert not bool(np.any(patch[:, reserved] != 0.0)), (
+                f"reserved channel {reserved} was written in config {cfg}, agent {k}; D-085 holds it at zero "
+                "until increment 4"
+            )
 
-    missing = [i for i, ok in enumerate(seen) if not ok]
+    missing = [i for i, ok in enumerate(seen) if not ok and i not in reserved]
     assert not missing, f"channels {missing} were never non-zero across any scenario, so they are untested"
 
 

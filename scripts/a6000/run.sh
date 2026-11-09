@@ -5,6 +5,12 @@
 #   bash scripts/a6000/run.sh sweep        the sweep. Needs the baselines. About 5.3 to 5.6 days on the A6000
 #   bash scripts/a6000/run.sh all          both, one after the other
 #   bash scripts/a6000/run.sh all --smoke  the same control flow at toy size, into runs/smoke-run
+#   bash scripts/a6000/run.sh longrun --shards=N   THE LONG RUN (D-084, D-087): the full map at 1,500 generations
+#                                          on seeds 20 to 39, in the frozen world, as N supervised processes side
+#                                          by side into runs/longrun/shardIofN. N comes from session 1's measured
+#                                          curve; the default is 1. Add --smoke for the toy-size rehearsal
+#   add --gpus=K on a machine with K GPUs: shard I runs on GPU (I mod K), each process seeing only its own
+#                                          card, so N shards spread over K cards (D-090). The default is 1
 #   add --verbose to any of these for a progress line every generation (sweep.py --progress verbose)
 #
 # Run inside tmux. Safe to run again at any time with the same arguments: finished seeds and conditions are
@@ -21,12 +27,16 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 STAGE=${1:-}
 SMOKE=0
+SHARDS=1
+GPUS=1
 PROGRESS=()
 for arg in "${@:2}"; do
   case "$arg" in
   --smoke) SMOKE=1 ;;
   --verbose) PROGRESS=(--progress verbose) ;;
-  *) echo "unknown option: $arg"; echo "usage: bash scripts/a6000/run.sh baselines|sweep|all [--smoke] [--verbose]"; exit 2 ;;
+  --shards=*) SHARDS=${arg#--shards=} ;;
+  --gpus=*) GPUS=${arg#--gpus=} ;;
+  *) echo "unknown option: $arg"; echo "usage: bash scripts/a6000/run.sh baselines|sweep|all|longrun [--shards=N] [--smoke] [--verbose]"; exit 2 ;;
   esac
 done
 SHA=$(cat VERIFIED_COMMIT)  # the run code is byte-identical to this commit, which passed the full differential
@@ -38,6 +48,21 @@ EXTRA=()
 if [ "$SMOKE" = 1 ]; then
   OUT=runs/smoke-run
   EXTRA=(--smoke)
+fi
+# The long run never shares a folder with Phase A's sweep (runs/sweep holds runs 42 to 44).
+if [ "$STAGE" = longrun ]; then
+  OUT=runs/longrun
+  [ "$SMOKE" = 1 ] && OUT=runs/smoke-longrun
+fi
+case "$SHARDS" in
+'' | *[!0-9]* | 0) echo "--shards must be a whole number of at least 1, not '$SHARDS'"; exit 2 ;;
+esac
+case "$GPUS" in
+'' | *[!0-9]* | 0) echo "--gpus must be a whole number of at least 1, not '$GPUS'"; exit 2 ;;
+esac
+if [ "$GPUS" -gt 1 ] && command -v nvidia-smi >/dev/null 2>&1; then
+  HAVE=$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ')
+  [ "$HAVE" -ge "$GPUS" ] || { echo "--gpus=$GPUS but this machine shows $HAVE GPU(s)"; exit 2; }
 fi
 mkdir -p "$OUT" results
 RUNLOG="$OUT/run.log"
@@ -57,7 +82,7 @@ on_interrupt() {
 trap on_interrupt INT TERM
 
 usage() {
-  echo "usage: bash scripts/a6000/run.sh baselines|sweep|all [--smoke] [--verbose]"
+  echo "usage: bash scripts/a6000/run.sh baselines|sweep|all|longrun [--shards=N] [--smoke] [--verbose]"
   exit 2
 }
 
@@ -93,10 +118,11 @@ preflight() {
   fi
 }
 
-# supervise <description> <extra sweep arguments...>
+# supervise <description> <status directory> <extra sweep arguments...>
+# The status directory is where this process's status.json appears: $OUT itself, or a shard's own folder.
 supervise() {
-  local desc=$1
-  shift
+  local desc=$1 sdir=$2
+  shift 2
   local attempt=0 pid rc launched age mtime nap
   while :; do
     attempt=$((attempt + 1))
@@ -118,7 +144,7 @@ supervise() {
       kill "$nap" 2>/dev/null
       [ "$STOPPING" = 1 ] && break
       mtime=$launched
-      [ -f "$OUT/status.json" ] && mtime=$(stat -c %Y "$OUT/status.json")
+      [ -f "$sdir/status.json" ] && mtime=$(stat -c %Y "$sdir/status.json")
       [ "$mtime" -lt "$launched" ] && mtime=$launched
       age=$(($(date +%s) - mtime))
       if [ "$age" -gt $((STALE_MINUTES * 60)) ] && kill -0 "$pid" 2>/dev/null; then
@@ -168,11 +194,11 @@ supervise() {
 
 baselines() {
   if [ "$SMOKE" = 1 ]; then
-    supervise "the smoke plan"
+    supervise "the smoke plan" "$OUT"
     return 0
   fi
-  supervise "the treatment baseline" --arms treatment --limit 1
-  supervise "the null baseline" --arms null --limit 1
+  supervise "the treatment baseline" "$OUT" --arms treatment --limit 1
+  supervise "the null baseline" "$OUT" --arms null --limit 1
   say "gate S5: is the null well behaved? Required."
   # Selected by "not test_s6", never by "s5": -k matches the module name too, and test_s5_s6_null.py
   # contains "s5", so "-k s5" also ran S6, which is expected to fail and is only recorded. Found when S5's
@@ -212,7 +238,7 @@ sweep() {
   local free
   free=$(df -BG --output=avail "$OUT" | tail -1 | tr -dc '0-9')
   [ "$free" -lt 90 ] && say "WARNING: ${free} GB free; the sweep needs about 80 GB. It stops cleanly if space runs out."
-  supervise "the sweep"
+  supervise "the sweep" "$OUT"
   # A rehearsal writes nothing to results/: a SWEEP_DONE or checksum file from toy data would read as the
   # real thing there. Found when a smoke run left both in a clone, D-063.
   if [ "$SMOKE" = 1 ]; then
@@ -224,7 +250,51 @@ sweep() {
   say "SWEEP COMPLETE. Send the folder $OUT and the folder results. Checksums: results/sweep-checksums.sha256"
 }
 
+longrun() {
+  local free i rc failed=0 pids=()
+  free=$(df -BG --output=avail "$OUT" | tail -1 | tr -dc '0-9')
+  # About 1.5 GB per condition (20 final populations of 256 genomes), 109 conditions: about 165 GB.
+  [ "$SMOKE" = 0 ] && [ "$free" -lt 200 ] && say "WARNING: ${free} GB free; the long run needs about 165 GB. It stops cleanly if space runs out."
+  say "the long run as $SHARDS supervised process(es) on $GPUS GPU(s), into $OUT/shardIof$SHARDS"
+  # Each shard is its own supervised loop in a subshell. Ctrl-C reaches this shell, which passes TERM to every
+  # shard; each shard's own trap passes it to its sweep process, which stops between checkpoints.
+  trap 'say "stopping all shards"; for p in "${pids[@]}"; do kill -TERM "$p" 2>/dev/null; done' INT TERM
+  for ((i = 0; i < SHARDS; i++)); do
+    if [ "$SHARDS" = 1 ]; then
+      (supervise "the long run" "$OUT") &
+    else
+      mkdir -p "$OUT/shard${i}of${SHARDS}"
+      if [ "$GPUS" -gt 1 ]; then
+        (export CUDA_VISIBLE_DEVICES=$((i % GPUS)); say "shard $i of $SHARDS on GPU $CUDA_VISIBLE_DEVICES"
+          supervise "shard $i of $SHARDS" "$OUT/shard${i}of${SHARDS}" --shard "$i/$SHARDS") &
+      else
+        (supervise "shard $i of $SHARDS" "$OUT/shard${i}of${SHARDS}" --shard "$i/$SHARDS") &
+      fi
+    fi
+    pids+=($!)
+    sleep 5  # staggered starts; every program comes from the shared compilation cache once the first has it
+  done
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}"
+    rc=$?
+    [ "$rc" = 0 ] || { failed=1; say "shard $i ended with exit $rc; the others continue"; }
+  done
+  trap on_interrupt INT TERM
+  if [ "$failed" = 1 ]; then
+    say "STOPPED: at least one shard did not finish. Run the same command again: finished seeds are kept."
+    exit 1
+  fi
+  if [ "$SMOKE" = 1 ]; then
+    say "smoke long run complete: every shard finished. Nothing went to results/."
+    return 0
+  fi
+  (cd "$OUT" && find . -name '*.npz' -not -path '*/partial/*' -print0 | sort -z | xargs -0 sha256sum >"$ROOT/results/longrun-checksums.sha256")
+  echo "long run done $(date '+%Y-%m-%d %H:%M:%S') shards $SHARDS verified commit $SHA" >results/LONGRUN_DONE
+  say "LONG RUN COMPLETE. Send the folder $OUT and the folder results. Checksums: results/longrun-checksums.sha256"
+}
+
 case "$STAGE" in
+longrun) preflight; longrun ;;
 baselines) preflight; baselines ;;
 sweep) preflight; sweep ;;
 all) preflight; baselines; sweep ;;
