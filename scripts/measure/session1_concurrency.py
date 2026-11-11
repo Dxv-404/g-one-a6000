@@ -2,7 +2,7 @@
 """Pre-run checklist 4.3: how many evolutionary runs can share the A6000 at once, MEASURED, not assumed.
 
     .venv/bin/python -u scripts/measure/session1_concurrency.py runs/session1/concurrency
-    options: --generations 50  --max-n 16  --flags=--xla_gpu_autotune_level=0  --cache shared|fresh
+    options: --generations 50  --max-n 32  --flags=--xla_gpu_autotune_level=0  --cache shared|fresh
              --smoke (2 generations, N up to 2, into a directory named for it)
 
 **The code path is the long run's own.** Every worker runs `sweep.one_seed(sweep.params_for("treatment", "baseline",
@@ -623,7 +623,7 @@ def main(argv=None) -> int:
     log(
         f"BACKGROUND GPU LOAD before anything of ours: {reference.get('util_mean', float('nan')):.0f} percent mean, "
         f"{reference.get('util_max', float('nan')):.0f} peak, {reference.get('mem_used_mib_mean', float('nan')):.0f} MiB "
-        "used. This is the colleague's job and the desktop; every round is compared with it."
+        "used. This is whatever else is on the GPU (the desktop, any other job); every round is compared with it."
     )
     gpu_total = reference.get("mem_total_mib")
 
@@ -855,8 +855,8 @@ def main(argv=None) -> int:
         "every_card": multi,
         "projection": projection,
         "foreign_workload_note": (
-            "Throughput was measured BESIDE a colleague's GPU job (nnU-Net, about 9.4 GB, "
-            "intermittent). The long-run day estimate holds only if it keeps running as it did."
+            "Throughput was measured beside the BACKGROUND GPU LOAD logged at the start. The long-run day "
+            "estimate holds only if the GPU's other load stays as it was."
         ),
         "rules": {
             "gain_floor": GAIN_FLOOR,

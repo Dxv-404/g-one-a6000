@@ -19,8 +19,17 @@ def test_the_forbidden_and_required_sets_are_what_the_project_requires():
     assert src.REQUIRED == {
         "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
         "XLA_PYTHON_CLIENT_ALLOCATOR": "cuda_async",
+        "XLA_FLAGS": "--xla_gpu_autotune_level=0",
     }
     assert set(src.FORBIDDEN) == {"JAX_ENABLE_X64"}
+
+
+def test_the_compiled_program_is_pinned_in_this_process():
+    """DEV-045: what XLA reads at backend start, not what the dict says. JAX reads XLA_FLAGS when the backend
+    initialises, which `import src` precedes, so the process environment at that point is the evidence."""
+    import os
+
+    assert os.environ.get("XLA_FLAGS") == "--xla_gpu_autotune_level=0"
 
 
 def test_runtime_check_passes_and_reports_what_it_observed():

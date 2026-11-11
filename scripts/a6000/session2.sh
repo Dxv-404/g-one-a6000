@@ -7,6 +7,7 @@
 #   bash scripts/a6000/session2.sh determinism  4.2 again, on the FINAL program: one seed in 6 fresh processes
 #   bash scripts/a6000/session2.sh concurrency  4.4: how many long-run processes at once, on the final program
 #   bash scripts/a6000/session2.sh recheck    4.5: S4 on the frozen setting, with the widened network (D-085)
+#   bash scripts/a6000/session2.sh batch      several seeds in ONE process: bit-identity and throughput (D-094)
 #
 # Run inside tmux. Nothing in runs/sweep, runs/replay or runs/longrun is touched. Everything goes into
 # runs/session2 and runs/s4-recheck, and at the end into the single file results/session2.tar, which is what to
@@ -22,8 +23,8 @@ LOG="$OUT/session2.log"
 say() { echo "$(date '+%Y-%m-%d %H:%M:%S')  session2.sh  $*" | tee -a "$LOG"; }
 
 case "$STAGE" in
-all | check | determinism | concurrency | recheck) ;;
-*) echo "usage: bash scripts/a6000/session2.sh [all|check|determinism|concurrency|recheck]"; exit 2 ;;
+all | check | determinism | concurrency | recheck | batch) ;;
+*) echo "usage: bash scripts/a6000/session2.sh [all|check|determinism|concurrency|recheck|batch]"; exit 2 ;;
 esac
 
 . scripts/a6000/env.sh
@@ -50,7 +51,7 @@ if [ -z "${TMUX:-}" ] && [ -z "${STY:-}" ]; then
   sleep 10
 fi
 say "frozen world: $("$PY" -c 'from configs import frozen_world as f; print(f.WORLD, "from", f.SOURCE)')"
-say "rough durations: machine check 45 to 75 minutes, concurrency 30 to 60, S4 re-check about 25 (64 episodes, D-092)"
+say "rough durations: machine check 25 to 75 minutes, concurrency 10 to 120, S4 re-check about 15 to 25, batch about 10"
 say "GPU right now: $(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader 2>/dev/null)"
 
 FAILED=0
@@ -82,6 +83,9 @@ if [ "$STAGE" = all ] || [ "$STAGE" = concurrency ]; then
 fi
 if [ "$STAGE" = all ] || [ "$STAGE" = recheck ]; then
   step recheck "$PY" -u scripts/measure/calibrate_s4.py runs/s4-recheck --frozen
+fi
+if [ "$STAGE" = all ] || [ "$STAGE" = batch ]; then
+  step batch "$PY" -u scripts/measure/batch_seeds.py "$OUT/batch"
 fi
 
 tar -cf results/session2.tar -C runs --exclude='session2/concurrency/*.npz' --exclude='s1cache-*' session2 s4-recheck

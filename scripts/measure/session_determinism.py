@@ -6,9 +6,9 @@ Session 1's 4.2 replayed Phase A checkpoints, which exist only on the A6000. Thi
 program that will actually run: one seed of the long run's own world (`sweep.params_for`, so the frozen world when
 there is one) is evolved for a few generations in `--runs` processes one after another, each with an EMPTY
 compilation cache, so every process compiles everything itself, which is the condition DEV-038's drift came from.
-Every run must equal the first bit for bit: final population, mean and best fitness. A contrast of `--contrast` runs
-without `--xla_gpu_autotune_level=0` is reported beside it, so the result can show whether the flag is what makes
-them agree.
+Every run must equal the first bit for bit: final population, mean and best fitness. The unflagged contrast this
+used to run beside it is no longer possible: src/__init__.py pins `--xla_gpu_autotune_level=0` in every process
+(DEV-045), so `--contrast` defaults to 0 and a request for it is reported as not run.
 
 It reuses session 1's worker and comparison (`session1_concurrency.run_round`, `compare_state`), so the two checks
 cannot differ in what "identical" means.
@@ -74,7 +74,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("out_dir", type=pathlib.Path)
     ap.add_argument("--runs", type=int, default=6)
-    ap.add_argument("--contrast", type=int, default=2)
+    ap.add_argument("--contrast", type=int, default=0)
     a = ap.parse_args(argv)
     a.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,9 +87,8 @@ def main(argv=None) -> int:
     log(f"VERDICT: {'PASSES' if ok else 'FAILS'}: {text}")
     c_ok, c_text = (None, "not run")
     if a.contrast:
-        cr, cs = series(a.contrast, "", a.out_dir, "unflagged", log)
-        c_ok, c_text = verdict(cr, cs)
-        log(f"contrast without the flag: {c_text}")
+        c_text = "not run: src/__init__.py pins the flag in every process, so an unflagged run is impossible (DEV-045)"
+        log(f"contrast: {c_text}")
     (a.out_dir / "verdict.json").write_text(
         json.dumps(
             {"passes": ok, "text": text, "contrast_identical": c_ok, "contrast_text": c_text}, indent=1

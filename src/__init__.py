@@ -50,6 +50,12 @@ REQUIRED = {
     # retries ever smaller sizes forever without raising. cuda_async allocates from CUDA's stream-ordered pool
     # and never takes that path. Allocation does not touch arithmetic, so no result changes; E1 confirms it.
     "XLA_PYTHON_CLIENT_ALLOCATOR": "cuda_async",
+    # DEV-045, Q-055, run 50, checklist 4.2. With autotuning on, two fresh compilations of one program can pick
+    # different kernels and disagree on near-tied actions (run 50: one fresh compile in four reproduced the
+    # sweep). The long run restarts processes, so it must compile one program every time. Checklist 4.2 said
+    # this lived in env.sh; it never did, and env.sh removes every inherited XLA_ variable, so until this line
+    # the long run compiled WITH autotuning while session 2 measured it without.
+    "XLA_FLAGS": "--xla_gpu_autotune_level=0",
 }
 
 FORBIDDEN = {
@@ -64,6 +70,7 @@ INHERITED_ENVIRONMENT = {
     for k in (
         "XLA_PYTHON_CLIENT_PREALLOCATE",
         "XLA_PYTHON_CLIENT_ALLOCATOR",
+        "XLA_FLAGS",
         "XLA_PYTHON_CLIENT_MEM_FRACTION",
         "XLA_CLIENT_MEM_FRACTION",
         "JAX_ENABLE_X64",

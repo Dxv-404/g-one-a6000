@@ -422,7 +422,7 @@ def test_the_concurrency_driver_runs_end_to_end_at_smoke_size(tmp_path):
     s = json.loads((out / "summary.json").read_text())
     assert [h["n"] for h in s["history"]] == [1, 2]
     assert s["history"][1]["identical"] is True and s["history"][1]["failed"] is False
-    assert "recommendation" in s and "BESIDE" in s["foreign_workload_note"]
+    assert "recommendation" in s and "BACKGROUND GPU LOAD" in s["foreign_workload_note"]
     rounds = json.loads((out / "rounds.json").read_text())["rounds"]
     assert set(rounds[0]["identity"]) == {"200", "201"}
     assert rounds[0]["background_before"]["available"] and rounds[0]["background_after"]["available"]

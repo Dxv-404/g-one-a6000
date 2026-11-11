@@ -273,6 +273,15 @@ def test_the_long_run_runs_in_the_world_the_calibration_chose():
     stage, t = cal.frozen_setting(frozen_world.WORLD)
     assert stage == 3
     assert cal.params_for(frozen_world.WORLD) == cal.sweep.params_for("treatment", "baseline", None)
+
+
+def test_the_frozen_worlds_source_is_a_registered_run():
+    """SOURCE must name a runs.md row that names the chosen setting. A check of the repository's records, not
+    of the code or the hardware, so the packages' machine check deselects it: runs.md is not shipped there."""
+    from configs import frozen_world
+
+    assert frozen_world.WORLD is not None
+    _, t = cal.frozen_setting(frozen_world.WORLD)
     run = frozen_world.SOURCE.split(",")[0]
     assert run.startswith("run ")
     rows = (ROOT / "runs.md").read_text().splitlines()
